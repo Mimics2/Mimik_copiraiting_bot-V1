@@ -13,15 +13,24 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-MOSCOW_TZ = pytz.timezone('Europe/Moscow')
+# Используем таймзону из config, если она там есть, иначе по умолчанию (Москва)
+try:
+    from config import MOSCOW_TZ
+except ImportError:
+    MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 
 class SchedulerBot:
     def __init__(self):
-        self.db = Database()
-        self.start_time = datetime.now(MOSCOW_TZ)
-        self.user_states = {}  # Словарь для хранения состояний пользователей (например, ожидание текста поста)
+        # Используем путь к БД из database.py, если он там есть, иначе bot.db
+        try:
+            self.db = Database('scheduler.db') 
+        except Exception:
+            self.db = Database('bot.db')
 
-    # --- Основная логика планировщика ---
+        self.start_time = datetime.now(MOSCOW_TZ)
+        self.user_states = {}  # Словарь для хранения состояний пользователей
+
+    # --- Основная логика планировщика (пропущена для краткости) ---
     async def check_posts_job(self, context: ContextTypes.DEFAULT_TYPE):
         """Периодически проверяет базу данных на наличие постов для публикации."""
         try:
@@ -35,163 +44,278 @@ class SchedulerBot:
                 post_time_naive = datetime.strptime(scheduled_time_str, '%Y-%m-%d %H:%M:%S')
                 post_time_aware = MOSCOW_TZ.localize(post_time_naive)
 
-                # Если время публикации настало, отправляем пост
+                # Если время пришло
                 if post_time_aware <= current_time:
-                    logger.info(f"Публикую пост {post_id} в канал {tg_channel_id}")
-                    await self.publish_post(post_id, tg_channel_id, message_text, context)
-        except Exception as e:
-            logger.error(f"Ошибка в задаче проверки постов: {e}")
+                    try:
+                        # Отправка поста
+                        await context.bot.send_message(
+                            chat_id=tg_channel_id, 
+                            text=message_text,
+                            parse_mode='HTML' # Предполагаем, что используется HTML-разметка
+                        )
+                        self.db.update_post_status(post_id, 'published')
+                        logger.info(f"Пост {post_id} опубликован в {tg_channel_id}")
+                    except Exception as e:
+                        logger.error(f"Не удалось опубликовать пост {post_id} в {tg_channel_id}: {e}")
+                        self.db.update_post_status(post_id, 'error')
 
-    async def publish_post(self, post_id, channel_id, message_text, context: ContextTypes.DEFAULT_TYPE):
-        """Отправляет сообщение в канал и обновляет статус поста."""
-        try:
-            await context.bot.send_message(chat_id=channel_id, text=message_text, parse_mode='HTML')
-            self.db.update_post_status(post_id, 'published')
-            logger.info(f"✅ Пост {post_id} успешно опубликован в канал {channel_id}")
         except Exception as e:
-            logger.error(f"❌ Ошибка публикации поста {post_id}: {e}")
-            self.db.update_post_status(post_id, 'error')
+            logger.error(f"Ошибка в задаче check_posts_job: {e}")
+
 
     # --- Обработчики команд ---
-    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if update.effective_user.id not in ADMIN_IDS:
-            await update.message.reply_text("❌ У вас нет доступа к этому боту.")
-            return
 
-        await update.message.reply_text(
-            "<b>🤖 Бот для планирования публикаций</b>\n\n"
-            "Используйте команды для управления вашими постами.\n\n"
-            "/status - Посмотреть статус бота\n"
-            "/add_channel - Добавить новый канал\n"
-            "/channels - Список подключенных каналов\n"
-            "/add_post - Запланировать новый пост\n"
-            "/posts - Посмотреть запланированные посты",
-            parse_mode='HTML'
+    async def _check_admin(self, update: Update) -> bool:
+        """Проверка прав администратора."""
+        user_id = update.effective_user.id
+        if user_id not in ADMIN_IDS:
+            await update.message.reply_text("❌ У вас нет доступа к этой команде.")
+            return False
+        return True
+
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._check_admin(update): return
+        
+        message = (
+            "🤖 **Бот-планировщик запущен.**\n\n"
+            "Доступные команды:\n"
+            "• `/add_channel` - Привязать канал.\n"
+            "• `/add_post` - Запланировать пост.\n"
+            "• `/channels` - Список привязанных каналов.\n"
+            "• `/posts` - Список запланированных постов.\n"
+            "• `/status` - Текущий статус бота."
         )
+        await update.message.reply_text(message, parse_mode='Markdown')
 
     async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if update.effective_user.id not in ADMIN_IDS: return
+        if not await self._check_admin(update): return
 
         uptime = datetime.now(MOSCOW_TZ) - self.start_time
-        hours, rem = divmod(uptime.total_seconds(), 3600)
-        minutes, _ = divmod(rem, 60)
-        
-        channels = self.db.get_channels()
-        posts = self.db.get_posts()
-        
-        next_post_str = "Нет запланированных постов"
-        if posts:
-            next_post_time_naive = datetime.strptime(posts[0][3], '%Y-%m-%d %H:%M:%S')
-            next_post_str = MOSCOW_TZ.localize(next_post_time_naive).strftime('%d.%m.%Y в %H:%M')
+        channels_count = len(self.db.get_channels())
+        posts_count = len(self.db.get_posts())
 
         message = (
-            f"<b>🤖 СТАТУС БОТА</b>\n\n"
-            f"<b>Время работы:</b> {int(hours)}ч {int(minutes)}м\n"
-            f"<b>Подключено каналов:</b> {len(channels)}\n"
-            f"<b>Запланировано постов:</b> {len(posts)}\n"
-            f"<b>Следующий пост:</b> {next_post_str}\n"
-            f"<b>Московское время:</b> {datetime.now(MOSCOW_TZ).strftime('%d.%m.%Y %H:%M:%S')}"
+            "✅ **Статус бота:** Работает\n"
+            f"🕰️ **Время запуска (МСК):** {self.start_time.strftime('%d.%m.%Y %H:%M:%S')}\n"
+            f"⏳ **Время работы:** {str(timedelta(seconds=int(uptime.total_seconds())))}\n"
+            f"📊 **Статистика БД:**\n"
+            f"  • Каналов привязано: {channels_count}\n"
+            f"  • Постов в очереди: {posts_count}"
         )
-        await update.message.reply_text(message, parse_mode='HTML')
+        await update.message.reply_text(message, parse_mode='Markdown')
 
     async def add_channel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if update.effective_user.id not in ADMIN_IDS: return
-        self.user_states[update.effective_user.id] = 'awaiting_channel'
-        await update.message.reply_text(
-            "<b>Чтобы добавить канал:</b>\n"
-            "1. Сделайте этого бота администратором в вашем канале с правом на публикацию сообщений.\n"
-            "2. Перешлите сюда любое сообщение из этого канала.",
-            parse_mode='HTML'
-        )
+        if not await self._check_admin(update): return
+        
+        user_id = update.effective_user.id
+        self.user_states[user_id] = 'awaiting_channel_forward'
+        await update.message.reply_text("Отлично, теперь **перешлите любое сообщение** из канала, который хотите привязать.")
 
     async def list_channels(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if update.effective_user.id not in ADMIN_IDS: return
+        if not await self._check_admin(update): return
+
         channels = self.db.get_channels()
         if not channels:
-            await update.message.reply_text("Каналы еще не добавлены. Используйте /add_channel.")
+            await update.message.reply_text("🤷‍♂️ Пока нет привязанных каналов.")
             return
-        
-        message = "<b>📋 Подключенные каналы:</b>\n\n"
-        for _, _, title, username in channels:
-            message += f"• {title} ({f'@{username}' if username else 'Без юзернейма'})\n"
-        await update.message.reply_text(message, parse_mode='HTML')
+
+        message = "📋 **Привязанные каналы:**\n\n"
+        for idx, channel in enumerate(channels, 1):
+            title = channel[2]
+            username = channel[3] or "Нет юзернейма"
+            tg_id = channel[1] # telegram_channel_id
+            
+            message += f"**{idx}. {title}**\n"
+            message += f"ID: `{tg_id}`\n"
+            if channel[3]:
+                message += f"@{username}\n"
+            message += "—\n"
+
+        await update.message.reply_text(message, parse_mode='Markdown')
 
     async def add_post(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if update.effective_user.id not in ADMIN_IDS: return
+        if not await self._check_admin(update): return
+        
         channels = self.db.get_channels()
         if not channels:
-            await update.message.reply_text("❌ Сначала добавьте канал с помощью /add_channel.")
+            await update.message.reply_text("❌ Сначала привяжите канал командой `/add_channel`.")
             return
 
-        context.user_data['target_channel_id'] = channels[0][0] # По умолчанию постим в первый добавленный канал
-        self.user_states[update.effective_user.id] = 'awaiting_post_text'
-        await update.message.reply_text("Пожалуйста, отправьте текст для нового поста.")
+        user_id = update.effective_user.id
+        self.user_states[user_id] = 'awaiting_post_details'
+        context.user_data['channels'] = channels
+        
+        # Шаг 1: Выбор канала
+        channel_list = "\n".join([
+            f"**{i}.** {c[2]} (`{c[1]}`)" for i, c in enumerate(channels, 1)
+        ])
+        
+        message = (
+            "📝 **Шаг 1/3: Выберите канал**\n\n"
+            "Введите **номер** канала из списка, куда нужно опубликовать пост:\n\n"
+            f"{channel_list}"
+        )
+        await update.message.reply_text(message, parse_mode='Markdown')
 
     async def list_posts(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if update.effective_user.id not in ADMIN_IDS: return
-        posts = self.db.get_posts()
+        if not await self._check_admin(update): return
+        
+        posts = self.db.get_posts() # Получает только scheduled
         if not posts:
-            await update.message.reply_text("📭 Нет запланированных постов.")
+            await update.message.reply_text("🤷‍♂️ В очереди нет запланированных постов.")
             return
-
-        message = "<b>📋 Запланированные посты (по МСК):</b>\n\n"
+        
+        message = f"📋 **Запланированные публикации** (МСК):\n\n"
+        
         for post in posts:
-            _, _, _, scheduled_time_str, _, _, channel_title, _ = post
-            post_time_naive = datetime.strptime(scheduled_time_str, '%Y-%m-%d %H:%M:%S')
-            time_formatted = MOSCOW_TZ.localize(post_time_naive).strftime('%d.%m.%Y %H:%M')
-            message += f"• <b>{time_formatted}</b> в '{channel_title}'\n"
-        await update.message.reply_text(message, parse_mode='HTML')
+            post_time = datetime.strptime(post[3], '%Y-%m-%d %H:%M:%S')
+            moscow_time = MOSCOW_TZ.localize(post_time)
+            time_str = moscow_time.strftime('%d.%m.%Y %H:%M')
+            channel_title = post[6]
+            
+            # Укорачиваем текст для списка
+            text_snippet = post[2][:50].replace('\n', ' ') + ('...' if len(post[2]) > 50 else '')
+            
+            message += f"• **{time_str}** в **{channel_title}**\n"
+            message += f"  Текст: _{text_snippet}_\n"
+            message += "—\n"
+        
+        await update.message.reply_text(message, parse_mode='Markdown')
 
-    # --- Обработчик сообщений для многошаговых действий ---
+    # --- Обработчик сообщений ---
+
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
-        if user_id not in ADMIN_IDS or user_id not in self.user_states: return
+        user_state = self.user_states.get(user_id)
+        
+        # Логика привязки канала
+        if user_state == 'awaiting_channel_forward':
+            # --- ЛОГИКА ДИАГНОСТИКИ И ИСПРАВЛЕНИЯ ПРОБЛЕМЫ ---
+            
+            # Проверяем, переслано ли сообщение
+            is_forwarded = bool(update.message.forward_from_chat)
+            
+            # Проверяем, не является ли сообщение от имени чата (для постов в группах)
+            is_from_sender_chat = bool(update.message.sender_chat)
 
-        state = self.user_states[user_id]
+            logger.info(f"Forwarded check: is_forwarded={is_forwarded}")
 
-        if state == 'awaiting_channel':
-            if update.message.forward_from_chat and update.message.forward_from_chat.type == 'channel':
+            if is_forwarded:
+                # 1. Основной путь: пересланное сообщение из канала
                 channel = update.message.forward_from_chat
-                if self.db.add_channel(channel.id, channel.title, channel.username):
-                    await update.message.reply_text(f"✅ Канал '<b>{channel.title}</b>' успешно добавлен!", parse_mode='HTML')
-                else:
-                    await update.message.reply_text("❌ Ошибка при добавлении канала.")
-                del self.user_states[user_id] # Сбрасываем состояние
-            else:
-                await update.message.reply_text("❌ Это не пересланное сообщение из канала. Попробуйте еще раз.")
+                logger.info(f"Forwarded chat info: type={channel.type}, title={channel.title}, id={channel.id}")
 
-        elif state == 'awaiting_post_text':
-            context.user_data['post_text'] = update.message.text
-            self.user_states[user_id] = 'awaiting_post_time'
-            await update.message.reply_text(
-                "Отлично. Теперь укажите время публикации (по МСК).\n\n"
-                "<b>Формат:</b> <code>ГГГГ-ММ-ДД ЧЧ:ММ</code>\n"
-                "<b>Пример:</b> <code>2025-12-31 18:00</code>",
-                parse_mode='HTML'
-            )
-
-        elif state == 'awaiting_post_time':
-            try:
-                naive_time = datetime.strptime(update.message.text, '%Y-%m-%d %H:%M')
-                aware_time = MOSCOW_TZ.localize(naive_time)
-
-                if aware_time <= datetime.now(MOSCOW_TZ):
-                    await update.message.reply_text("❌ Это время уже прошло. Попробуйте снова.")
+                if channel.type == 'channel':
+                    title = channel.title
+                    username = channel.username if channel.username else None
+                    tg_channel_id = channel.id
+                    
+                    if self.db.add_channel(tg_channel_id, title, username):
+                        await update.message.reply_text(
+                            f"✅ Канал **{title}** привязан успешно!\n"
+                            f"ID: `{tg_channel_id}`",
+                            parse_mode='Markdown'
+                        )
+                    else:
+                        await update.message.reply_text("❌ **Ошибка при добавлении канала.** Проверьте логи бота.")
+                    
+                    del self.user_states[user_id]
                     return
-
-                channel_db_id = context.user_data['target_channel_id']
-                post_text = context.user_data['post_text']
-                
-                if self.db.add_post(channel_db_id, post_text, aware_time.strftime('%Y-%m-%d %H:%M:%S')):
-                    await update.message.reply_text(f"✅ Пост запланирован на <b>{aware_time.strftime('%d.%m.%Y %H:%M')}</b>.")
                 else:
-                    await update.message.reply_text("❌ Ошибка при планировании поста.")
+                    await update.message.reply_text(
+                        "❌ Пересланное сообщение не из **канала** (тип: `{}`). Убедитесь, что вы пересылаете пост из самого канала, а не из связанной группы обсуждения.".format(channel.type),
+                        parse_mode='Markdown'
+                    )
+                    return
+            
+            elif is_from_sender_chat and update.message.sender_chat.type in ('channel', 'supergroup'):
+                # 2. Альтернативный путь: если сообщение пришло от имени чата (например, анонимный админ), но не как форвард
+                channel = update.message.sender_chat
+                logger.warning(f"Using sender_chat: type={channel.type}, title={channel.title}, id={channel.id}")
+
+                await update.message.reply_text(
+                    "❌ Не удалось получить ID через этот тип сообщения. **Пожалуйста, перешлите** сообщение из канала, предварительно **отключив в канале** настройку 'Запретить сохранение контента'."
+                )
+                # Оставляем состояние, чтобы пользователь мог попробовать еще раз
+                return
+
+
+            await update.message.reply_text(
+                "❌ **Это не пересланное сообщение из канала.** Попробуйте еще раз.\n\n"
+                "**Возможные причины:**\n"
+                "1. В канале включено 'Запретить сохранение контента'. **Отключите** ее временно.\n"
+                "2. Вы не отправили команду `/add_channel` перед пересылкой.\n"
+                "3. Вы переслали сообщение из *группы*, а не из *канала*."
+            )
+            return
+
+        # Логика добавления поста (Шаг 1: Выбор канала)
+        if user_state == 'awaiting_post_details':
+            try:
+                channel_number = int(update.message.text.strip())
+                channels = context.user_data.get('channels', [])
                 
+                if 1 <= channel_number <= len(channels):
+                    selected_channel = channels[channel_number - 1]
+                    context.user_data['selected_channel'] = selected_channel
+                    self.user_states[user_id] = 'awaiting_post_text'
+                    
+                    await update.message.reply_text("📝 **Шаг 2/3: Введите текст поста.**\n\nМожно использовать HTML-разметку.")
+                else:
+                    await update.message.reply_text("❌ Неверный номер канала. Повторите ввод.")
+
+            except ValueError:
+                await update.message.reply_text("❌ Ожидается ввод **номера**, а не текста. Повторите ввод.")
+            return
+
+        # Логика добавления поста (Шаг 2: Ввод текста)
+        if user_state == 'awaiting_post_text':
+            post_text = update.message.text
+            context.user_data['post_text'] = post_text
+            self.user_states[user_id] = 'awaiting_schedule_time'
+            
+            await update.message.reply_text(
+                "⏰ **Шаг 3/3: Введите время публикации** (в Московском времени).\n\n"
+                "Формат: `ГГГГ-ММ-ДД ЧЧ:ММ` (например, `2025-10-20 18:30`)"
+            )
+            return
+
+        # Логика добавления поста (Шаг 3: Ввод времени)
+        if user_state == 'awaiting_schedule_time':
+            schedule_time_str = update.message.text.strip()
+            
+            try:
+                # Парсинг и проверка времени
+                naive_time = datetime.strptime(schedule_time_str, '%Y-%m-%d %H:%M')
+                scheduled_time_aware = MOSCOW_TZ.localize(naive_time)
+                
+                # Проверка, что время в будущем
+                if scheduled_time_aware <= datetime.now(MOSCOW_TZ):
+                    await update.message.reply_text("❌ Выбранное время уже прошло. Укажите время в будущем.")
+                    return
+                
+                channel_db_id = context.user_data['selected_channel'][0]
+                post_text = context.user_data['post_text']
+
+                # Сохранение в БД
+                if self.db.add_post(channel_db_id, post_text, naive_time.strftime('%Y-%m-%d %H:%M:%S')):
+                    channel_title = context.user_data['selected_channel'][2]
+                    await update.message.reply_text(
+                        f"✅ Пост успешно запланирован!\n\n"
+                        f"**Канал:** {channel_title}\n"
+                        f"**Время (МСК):** {scheduled_time_aware.strftime('%d.%m.%Y %H:%M')}",
+                        parse_mode='Markdown'
+                    )
+                else:
+                    await update.message.reply_text("❌ Ошибка при планировании поста. Проверьте логи.")
+                
+                # Сброс состояния и данных
                 del self.user_states[user_id]
                 context.user_data.clear()
 
             except (ValueError, TypeError):
-                await update.message.reply_text("❌ Неверный формат. Используйте <code>ГГГГ-ММ-ДД ЧЧ:ММ</code>.", parse_mode='HTML')
+                await update.message.reply_text("❌ Неверный формат. Используйте `ГГГГ-ММ-ДД ЧЧ:ММ`.", parse_mode='HTML')
+
 
 def main():
     """Запуск бота."""
@@ -214,8 +338,9 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message))
     application.add_handler(MessageHandler(filters.FORWARDED & ~filters.COMMAND, bot.handle_message))
 
-    logger.info("Бот запускается...")
-    application.run_polling()
+    logger.info("Бот запущен. Ожидание обновлений...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     main()
+
