@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime, timedelta
 import pytz
-import re # Добавлено для команды /manual_channel
+import re 
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -14,11 +14,11 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+# Используем Москву как эталон для планирования
 MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 
 class SchedulerBot:
     def __init__(self):
-        # Используем путь 'bot.db' по умолчанию из database.py
         self.db = Database() 
         self.start_time = datetime.now(MOSCOW_TZ)
         self.user_states = {}  # Словарь для хранения состояний пользователей
@@ -27,7 +27,6 @@ class SchedulerBot:
     async def check_posts_job(self, context: ContextTypes.DEFAULT_TYPE):
         """Периодически проверяет базу данных на наличие постов для публикации."""
         try:
-            # Получает только запланированные посты
             posts = self.db.get_posts()
             current_time = datetime.now(MOSCOW_TZ)
 
@@ -58,30 +57,13 @@ class SchedulerBot:
             self.db.update_post_status(post_id, 'error')
 
 
-    # --- ОБРАБОТЧИКИ КОМАНД ---
-    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if update.effective_user.id not in ADMIN_IDS:
-            await update.message.reply_text("❌ У вас нет доступа к этому боту.")
-            return
-
-        commands = [
-            BotCommand("status", "Посмотреть статус бота"),
-            BotCommand("add_channel", "Добавить новый канал"),
-            BotCommand("channels", "Список подключенных каналов"),
-            BotCommand("add_post", "Запланировать новый пост"),
-            BotCommand("posts", "Список запланированных постов"),
-            BotCommand("test_post", "Проверить публикацию в первом канале"),
-            BotCommand("manual_channel", "Ручной ввод ID канала") # Добавлено
-        ]
-        await context.bot.set_my_commands(commands)
-
-
+    # --- ФУНКЦИИ ВРЕМЕНИ И СТАТУСА ---
+    async def show_time(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показывает текущее время в Москве (МСК)."""
+        if update.effective_user.id not in ADMIN_IDS: return
+        current_time = datetime.now(MOSCOW_TZ).strftime('%d.%m.%Y %H:%M:%S')
         await update.message.reply_text(
-            "<b>🤖 Бот для планирования публикаций</b>\n\n"
-            "Используйте команды для управления вашими постами.\n\n"
-            "/add_channel - Добавить новый канал (через пересылку)\n"
-            "/manual_channel - Добавить канал вручную по ID\n"
-            "/test_post - Проверить, работают ли права администратора",
+            f"Текущее время в Москве (МСК): \n<b>{current_time}</b>",
             parse_mode='HTML'
         )
 
@@ -110,6 +92,35 @@ class SchedulerBot:
         )
         await update.message.reply_text(message, parse_mode='HTML')
 
+
+    # --- ОБРАБОТЧИКИ КОМАНД ---
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if update.effective_user.id not in ADMIN_IDS:
+            await update.message.reply_text("❌ У вас нет доступа к этому боту.")
+            return
+
+        commands = [
+            BotCommand("status", "Посмотреть статус бота"),
+            BotCommand("time", "Показать текущее время (МСК)"),
+            BotCommand("add_channel", "Добавить новый канал"),
+            BotCommand("channels", "Список подключенных каналов"),
+            BotCommand("add_post", "Запланировать новый пост"),
+            BotCommand("posts", "Список запланированных постов"),
+            BotCommand("test_post", "Проверить публикацию в первом канале"),
+            BotCommand("manual_channel", "Ручной ввод ID канала")
+        ]
+        await context.bot.set_my_commands(commands)
+
+
+        await update.message.reply_text(
+            "<b>🤖 Бот для планирования публикаций</b>\n\n"
+            "Используйте команды для управления вашими постами.\n\n"
+            "/add_channel - Добавить новый канал (через пересылку)\n"
+            "/manual_channel - Добавить канал вручную по ID\n"
+            "/test_post - Проверить, работают ли права администратора",
+            parse_mode='HTML'
+        )
+
     async def add_channel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id not in ADMIN_IDS: return
         self.user_states[update.effective_user.id] = 'awaiting_channel_forward'
@@ -122,14 +133,14 @@ class SchedulerBot:
         )
     
     async def manual_channel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Новая команда для ручного ввода ID канала."""
+        """Команда для ручного ввода ID канала."""
         if update.effective_user.id not in ADMIN_IDS: return
         self.user_states[update.effective_user.id] = 'awaiting_channel_manual_id'
         await update.message.reply_text(
             "<b>РЕЖИМ РУЧНОГО ВВОДА:</b>\n"
             "Введите числовой ID канала (например, <code>-1001234567890</code>) и его название через запятую.\n\n"
             "<b>Формат:</b> <code>-ID,Название канала</code>\n"
-            "<i>(Используйте @getids_bot, чтобы получить ID)</i>",
+            "<i>(Используйте веб-версию Telegram, чтобы получить ID, если другие методы не работают)</i>",
             parse_mode='HTML'
         )
 
@@ -137,7 +148,7 @@ class SchedulerBot:
         if update.effective_user.id not in ADMIN_IDS: return
         channels = self.db.get_channels()
         if not channels:
-            await update.message.reply_text("Каналы еще не добавлены. Используйте /add_channel.")
+            await update.message.reply_text("Каналы еще не добавлены. Используйте /add_channel или /manual_channel.")
             return
         
         message = "<b>📋 Подключенные каналы:</b>\n\n"
@@ -334,12 +345,13 @@ def main():
     # Регистрируем обработчики команд
     application.add_handler(CommandHandler("start", bot.start))
     application.add_handler(CommandHandler("status", bot.status))
+    application.add_handler(CommandHandler("time", bot.show_time)) # Новая команда
     application.add_handler(CommandHandler("add_channel", bot.add_channel))
-    application.add_handler(CommandHandler("manual_channel", bot.manual_channel)) # Новая команда
+    application.add_handler(CommandHandler("manual_channel", bot.manual_channel))
     application.add_handler(CommandHandler("channels", bot.list_channels))
     application.add_handler(CommandHandler("add_post", bot.add_post))
     application.add_handler(CommandHandler("posts", bot.list_posts))
-    application.add_handler(CommandHandler("test_post", bot.test_post)) # Новая команда
+    application.add_handler(CommandHandler("test_post", bot.test_post))
     
     # Регистрируем обработчик текстовых и пересланных сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message))
@@ -350,4 +362,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
