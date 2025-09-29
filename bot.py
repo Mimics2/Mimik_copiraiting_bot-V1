@@ -1,12 +1,70 @@
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 import pytz
 import re 
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-from config import BOT_TOKEN, ADMIN_IDS
-from database import Database
+# --- ПРЕДПОЛАГАЕМ, ЧТО ЭТИ ФАЙЛЫ (config, database) СУЩЕСТВУЮТ ---
+# from config import BOT_TOKEN, ADMIN_IDS
+# from database import Database
+
+# Заглушки для корректной работы кода без фактических файлов:
+BOT_TOKEN = "YOUR_BOT_TOKEN"
+ADMIN_IDS = [123456789] # Замените на ваш ID
+class Database:
+    def __init__(self):
+        # Структура: id, tg_channel_id, title, username, added_date
+        self.channels = {
+            1: (1, -1001234567890, "Копирайтинг PRO", "copy_pro", datetime.now()),
+            2: (2, -1001987654321, "Личный Блог", "my_personal_blog", datetime.now())
+        }
+        # Структура: post_id, channel_db_id, message_text, scheduled_time_str, status, created_date, channel_title, tg_channel_id
+        self.posts = []
+
+    def get_channels(self):
+        return list(self.channels.values())
+    
+    def get_channel_by_db_id(self, db_id):
+        return self.channels.get(db_id)
+
+    def add_channel(self, tg_channel_id, title, username):
+        if not any(c[1] == tg_channel_id for c in self.channels.values()):
+            new_id = max(self.channels.keys()) + 1 if self.channels else 1
+            self.channels[new_id] = (new_id, tg_channel_id, title, username, datetime.now())
+            return True
+        return False
+
+    def get_posts(self):
+        # В реальном коде тут должна быть выборка из БД
+        return [p for p in self.posts if p[4] != 'published']
+
+    def add_post(self, channel_db_id, message_text, scheduled_time_str):
+        post_id = len(self.posts) + 1
+        channel = self.get_channel_by_db_id(channel_db_id)
+        if not channel: return False
+        
+        _, tg_channel_id, channel_title, _, _ = channel
+        
+        self.posts.append((
+            post_id, 
+            channel_db_id, 
+            message_text, 
+            scheduled_time_str, 
+            'pending', 
+            datetime.now(), 
+            channel_title, 
+            tg_channel_id
+        ))
+        # Сортируем посты по времени для get_posts
+        self.posts.sort(key=lambda x: datetime.strptime(x[3], '%Y-%m-%d %H:%M:%S'))
+        return True
+
+    def update_post_status(self, post_id, status):
+        # Обновление статуса в реальной БД
+        pass 
+# -------------------------------------------------------------------
+
 
 # --- Настройка логирования и часового пояса ---
 logging.basicConfig(
@@ -19,6 +77,7 @@ MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 
 class SchedulerBot:
     def __init__(self):
+        # Используем заглушку, замените на self.db = Database()
         self.db = Database() 
         self.start_time = datetime.now(MOSCOW_TZ)
         self.user_states = {}  # Словарь для хранения состояний пользователей
@@ -158,18 +217,27 @@ class SchedulerBot:
         await update.message.reply_text(message, parse_mode='HTML')
 
     async def add_post(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Позволяет выбрать канал из списка перед вводом текста."""
         if update.effective_user.id not in ADMIN_IDS: return
         channels = self.db.get_channels()
         if not channels:
             await update.message.reply_text("❌ Сначала добавьте канал с помощью /add_channel или /manual_channel.")
             return
 
-        # Для простоты постим в первый добавленный канал. 
-        context.user_data['target_channel_id'] = channels[0][0] # ID канала в БД
-        context.user_data['target_channel_title'] = channels[0][2] # Название канала
+        # --- ИЗМЕНЕНИЕ: Выводим нумерованный список каналов ---
+        message = "<b>Выберите канал для публикации, отправив его номер:</b>\n\n"
         
-        self.user_states[update.effective_user.id] = 'awaiting_post_text'
-        await update.message.reply_text(f"Пожалуйста, отправьте текст для нового поста в канал: <b>{channels[0][2]}</b>", parse_mode='HTML')
+        # Сохраняем словарь для быстрого поиска по номеру
+        context.user_data['available_channels'] = {} 
+        
+        for i, channel in enumerate(channels, 1):
+            db_id, _, title, _, _ = channel
+            message += f"<b>{i}.</b> {title}\n"
+            # Сохраняем ID канала в БД
+            context.user_data['available_channels'][str(i)] = db_id 
+        
+        self.user_states[update.effective_user.id] = 'awaiting_channel_choice'
+        await update.message.reply_text(message, parse_mode='HTML')
 
     async def list_posts(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id not in ADMIN_IDS: return
@@ -210,6 +278,7 @@ class SchedulerBot:
             await update.message.reply_text(f"❌ **ОШИБКА!** Не удалось отправить тестовый пост.\n\nКод ошибки: <code>{e}</code>\n\n"
                                           "<b>Вероятная причина:</b> Бот не является Администратором или у него нет права 'Публикация сообщений'.", 
                                           parse_mode='HTML')
+                                          
     # --- ОБРАБОТЧИК СООБЩЕНИЙ ---
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
@@ -217,6 +286,35 @@ class SchedulerBot:
         if user_id not in ADMIN_IDS or user_id not in self.user_states: return
 
         state = self.user_states[user_id]
+        text = update.message.text.strip() # Используем text.strip() для ручного ввода
+        
+        # 0. ВЫБОР КАНАЛА (НОВЫЙ БЛОК)
+        if state == 'awaiting_channel_choice':
+            if text in context.user_data.get('available_channels', {}):
+                # Получаем ID канала в БД по выбранному номеру
+                channel_db_id = context.user_data['available_channels'][text]
+                
+                # Получаем полное название канала из БД по ID
+                channels = self.db.get_channels()
+                target_channel = next((c for c in channels if c[0] == channel_db_id), None)
+                
+                if target_channel:
+                    context.user_data['target_channel_id'] = channel_db_id
+                    context.user_data['target_channel_title'] = target_channel[2] # Название канала
+                    
+                    self.user_states[user_id] = 'awaiting_post_text'
+                    await update.message.reply_text(
+                        f"Отлично! Выбран канал: <b>{target_channel[2]}</b>. "
+                        "Пожалуйста, отправьте текст для нового поста.", 
+                        parse_mode='HTML'
+                    )
+                else:
+                    await update.message.reply_text("❌ Ошибка: Выбранный канал не найден в базе.")
+                del context.user_data['available_channels'] # Очистка
+            else:
+                await update.message.reply_text("❌ Неверный номер. Пожалуйста, отправьте только номер канала из списка.", parse_mode='HTML')
+            return
+
 
         # 1. АВТОМАТИЧЕСКАЯ ПРИВЯЗКА (через /add_channel)
         if state == 'awaiting_channel_forward':
@@ -255,7 +353,6 @@ class SchedulerBot:
 
         # 2. РУЧНАЯ ПРИВЯЗКА (через /manual_channel)
         elif state == 'awaiting_channel_manual_id':
-            text = update.message.text.strip()
             # Ожидаем формат: -ID,Название канала
             match = re.match(r'^(-?\d+),(.*)$', text)
             
@@ -362,5 +459,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
