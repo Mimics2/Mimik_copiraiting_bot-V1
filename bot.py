@@ -2,9 +2,11 @@ import logging
 from datetime import datetime, timedelta
 import pytz
 import re 
-from telegram import Update, BotCommand, ParseMode
+# --- ИСПРАВЛЕНИЕ: ParseMode удален, вместо него импортирован constants ---
+from telegram import Update, BotCommand, constants
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
+# Примечание: предполагается, что config и database доступны
 from config import BOT_TOKEN, ADMIN_IDS
 from database import Database
 
@@ -71,20 +73,20 @@ class SchedulerBot:
                     chat_id=tg_channel_id_str,
                     photo=media_file_id,
                     caption=caption_text,
-                    parse_mode='HTML'
+                    parse_mode=constants.ParseMode.HTML # <--- ИСПРАВЛЕНО
                 )
             elif media_type == 'video':
                 await context.bot.send_video(
                     chat_id=tg_channel_id_str,
                     video=media_file_id,
                     caption=caption_text,
-                    parse_mode='HTML'
+                    parse_mode=constants.ParseMode.HTML # <--- ИСПРАВЛЕНО
                 )
             else: # Только текст
                 await context.bot.send_message(
                     chat_id=tg_channel_id_str, 
                     text=message_text, 
-                    parse_mode='HTML'
+                    parse_mode=constants.ParseMode.HTML # <--- ИСПРАВЛЕНО
                 )
 
             self.db.update_post_status(post_id, 'published')
@@ -122,7 +124,7 @@ class SchedulerBot:
             "/add_post - Планирование поста\n"
             "/set_prompt - Настройка ИИ инструкции\n"
             "/add_admin - Добавление нового админа",
-            parse_mode='HTML'
+            parse_mode=constants.ParseMode.HTML # <--- ИСПРАВЛЕНО
         )
 
     async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -148,14 +150,14 @@ class SchedulerBot:
             f"<b>Следующий пост:</b> {next_post_str}\n"
             f"<b>Московское время:</b> {datetime.now(MOSCOW_TZ).strftime('%d.%m.%Y %H:%M:%S')}"
         )
-        await update.message.reply_text(message, parse_mode='HTML')
+        await update.message.reply_text(message, parse_mode=constants.ParseMode.HTML) # <--- ИСПРАВЛЕНО
 
     async def show_time(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.is_user_admin(update.effective_user.id): return
         current_time = datetime.now(MOSCOW_TZ).strftime('%d.%m.%Y %H:%M:%S')
         await update.message.reply_text(
             f"Текущее время в Москве (МСК): \n<b>{current_time}</b>",
-            parse_mode='HTML'
+            parse_mode=constants.ParseMode.HTML # <--- ИСПРАВЛЕНО
         )
 
     async def test_post(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -170,15 +172,16 @@ class SchedulerBot:
         channel_title = channels[0][2]
         test_message = f"✅ Тестовая публикация от планировщика! Время: {datetime.now(MOSCOW_TZ).strftime('%H:%M:%S')}"
 
-        await update.message.reply_text(f"Попытка отправить тестовый пост в <b>{channel_title}</b> ({tg_channel_id})...", parse_mode='HTML')
+        await update.message.reply_text(f"Попытка отправить тестовый пост в <b>{channel_title}</b> ({tg_channel_id})...", parse_mode=constants.ParseMode.HTML) # <--- ИСПРАВЛЕНО
         
         try:
-            await context.bot.send_message(chat_id=str(tg_channel_id), text=test_message)
-            await update.message.reply_text(f"✅ **УСПЕХ!** Тестовый пост успешно отправлен.", parse_mode='HTML')
+            # Здесь не нужно parse_mode='HTML' по умолчанию, но для HTML разметки нужно
+            await context.bot.send_message(chat_id=str(tg_channel_id), text=test_message, parse_mode=constants.ParseMode.HTML)
+            await update.message.reply_text(f"✅ **УСПЕХ!** Тестовый пост успешно отправлен.", parse_mode=constants.ParseMode.HTML) # <--- ИСПРАВЛЕНО
         except Exception as e:
             await update.message.reply_text(f"❌ **ОШИБКА!** Не удалось отправить тестовый пост.\n\nКод ошибки: <code>{e}</code>\n\n"
                                           "<b>Вероятная причина:</b> Бот не является Администратором или у него нет права 'Публикация сообщений'.", 
-                                          parse_mode='HTML')
+                                          parse_mode=constants.ParseMode.HTML) # <--- ИСПРАВЛЕНО
 
 
     # --- КОМАНДЫ УПРАВЛЕНИЯ КАНАЛАМИ И КОНТЕНТОМ ---
@@ -191,7 +194,7 @@ class SchedulerBot:
             "1. Сделайте этого бота администратором в вашем канале с правом на публикацию сообщений.\n"
             "2. Перешлите сюда любое сообщение из этого канала.\n\n"
             "Или используйте <b>/manual_channel</b> для ручного ввода."
-            , parse_mode='HTML'
+            , parse_mode=constants.ParseMode.HTML # <--- ИСПРАВЛЕНО
         )
     
     async def manual_channel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -201,7 +204,7 @@ class SchedulerBot:
             "<b>РЕЖИМ РУЧНОГО ВВОДА:</b>\n"
             "Введите числовой ID канала (например, <code>-1001234567890</code>) и его название через запятую.\n\n"
             "<b>Формат:</b> <code>-ID,Название канала</code>",
-            parse_mode='HTML'
+            parse_mode=constants.ParseMode.HTML # <--- ИСПРАВЛЕНО
         )
 
     async def list_channels(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -217,7 +220,7 @@ class SchedulerBot:
             prompt_status = "✅ Есть промпт" if default_prompt else "❌ Нет промпта"
             message += f"• {title} ({prompt_status})\n"
             message += f"  (ID: <code>{tg_id}</code>, Внутр. ID: <code>{db_id}</code>)\n"
-        await update.message.reply_text(message, parse_mode='HTML')
+        await update.message.reply_text(message, parse_mode=constants.ParseMode.HTML) # <--- ИСПРАВЛЕНО
 
     async def add_post(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.is_user_admin(update.effective_user.id): return
@@ -236,7 +239,7 @@ class SchedulerBot:
         message += "\nВведите **внутренний ID** канала (число в скобках)."
         
         self.user_states[update.effective_user.id] = 'awaiting_target_channel_id'
-        await update.message.reply_text(message, parse_mode='HTML')
+        await update.message.reply_text(message, parse_mode=constants.ParseMode.HTML) # <--- ИСПРАВЛЕНО
 
 
     async def list_posts(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -258,7 +261,7 @@ class SchedulerBot:
             text_snippet = message_text[:40].replace('\n', ' ') + ('...' if len(message_text) > 40 else '')
             message += f"• <b>{time_formatted}</b>{media_info} в '{channel_title}'\n"
             message += f"  <i>Текст: {text_snippet}</i>\n"
-        await update.message.reply_text(message, parse_mode='HTML')
+        await update.message.reply_text(message, parse_mode=constants.ParseMode.HTML) # <--- ИСПРАВЛЕНО
 
 
     # --- КОМАНДЫ УПРАВЛЕНИЯ АДМИНАМИ И ПРОМПТАМИ ---
@@ -272,7 +275,7 @@ class SchedulerBot:
         await update.message.reply_text(
             "<b>Введите ID нового администратора (число)</b>. \n\n"
             "Чтобы узнать ID, пользователь должен отправить команду /myid любому публичному боту.",
-            parse_mode='HTML'
+            parse_mode=constants.ParseMode.HTML # <--- ИСПРАВЛЕНО
         )
 
     async def list_admins(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -290,7 +293,7 @@ class SchedulerBot:
             status = " (Главный)" if user_id in ADMIN_IDS else ""
             message += f"• <code>{user_id}</code>: {username or 'Нет юзернейма'}{status}\n"
         
-        await update.message.reply_text(message, parse_mode='HTML')
+        await update.message.reply_text(message, parse_mode=constants.ParseMode.HTML) # <--- ИСПРАВЛЕНО
 
 
     async def set_prompt_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -308,7 +311,7 @@ class SchedulerBot:
             message += f"• <b>{title}</b> (ID: <code>{tg_id}</code>) - {status}\n"
         
         self.user_states[update.effective_user.id] = 'awaiting_prompt_channel_id'
-        await update.message.reply_text(message, parse_mode='HTML')
+        await update.message.reply_text(message, parse_mode=constants.ParseMode.HTML) # <--- ИСПРАВЛЕНО
 
 
     # --- ОБРАБОТЧИК СООБЩЕНИЙ (HANDLE_MESSAGE) ---
@@ -335,7 +338,7 @@ class SchedulerBot:
                     await update.message.reply_text(
                         f"✅ Канал '<b>{title}</b>' успешно добавлен через пересылку!\n"
                         f"Telegram ID: <code>{tg_channel_id}</code>", 
-                        parse_mode='HTML'
+                        parse_mode=constants.ParseMode.HTML # <--- ИСПРАВЛЕНО
                     )
                 else:
                     await update.message.reply_text("❌ Ошибка при добавлении канала (БД).")
@@ -343,7 +346,7 @@ class SchedulerBot:
             else:
                 await update.message.reply_text(
                     "❌ Не удалось получить ID через пересылку. Попробуйте ручной ввод: <b>/manual_channel</b>"
-                    , parse_mode='HTML'
+                    , parse_mode=constants.ParseMode.HTML # <--- ИСПРАВЛЕНО
                 )
 
         # 2. РУЧНАЯ ПРИВЯЗКА (/manual_channel)
@@ -360,7 +363,7 @@ class SchedulerBot:
                     await update.message.reply_text(
                         f"✅ Канал '<b>{title}</b>' успешно добавлен вручную!\n"
                         f"Telegram ID: <code>{tg_channel_id}</code>", 
-                        parse_mode='HTML'
+                        parse_mode=constants.ParseMode.HTML # <--- ИСПРАВЛЕНО
                     )
                 else:
                     await update.message.reply_text("❌ Ошибка при добавлении канала (БД).")
@@ -368,7 +371,7 @@ class SchedulerBot:
             else:
                 await update.message.reply_text(
                     "❌ Неверный формат. Используйте: <code>-ID,Название канала</code>", 
-                    parse_mode='HTML'
+                    parse_mode=constants.ParseMode.HTML # <--- ИСПРАВЛЕНО
                 )
         
         # 3. ДОБАВЛЕНИЕ НОВОГО АДМИНИСТРАТОРА (/add_admin)
@@ -386,7 +389,7 @@ class SchedulerBot:
                 if self.db.add_admin(new_admin_id, username):
                     await update.message.reply_text(
                         f"✅ Пользователь <b>{username}</b> (ID: <code>{new_admin_id}</code>) успешно добавлен как администратор!",
-                        parse_mode='HTML'
+                        parse_mode=constants.ParseMode.HTML # <--- ИСПРАВЛЕНО
                     )
                 else:
                     await update.message.reply_text("❌ Ошибка базы данных или админ уже существует.")
@@ -415,7 +418,7 @@ class SchedulerBot:
                 await update.message.reply_text(
                     f"Выбран канал <b>{channel_info[2]}</b>. Теперь отправьте **фото, видео или текст** для нового поста.\n\n"
                     "<i>(Текст для медиафайлов укажите в подписи!)</i>", 
-                    parse_mode='HTML'
+                    parse_mode=constants.ParseMode.HTML # <--- ИСПРАВЛЕНО
                 )
 
             except ValueError:
@@ -463,7 +466,7 @@ class SchedulerBot:
                 f"{media_status}\nТеперь укажите время публикации (по МСК).\n\n"
                 "<b>Формат:</b> <code>ГГГГ-ММ-ДД ЧЧ:ММ</code>\n"
                 "<b>Пример:</b> <code>2025-12-31 18:00</code>",
-                parse_mode='HTML'
+                parse_mode=constants.ParseMode.HTML # <--- ИСПРАВЛЕНО
             )
 
 
@@ -488,7 +491,7 @@ class SchedulerBot:
                     media_info = f" ({media_type.upper()})" if media_type else ""
                     await update.message.reply_text(
                         f"✅ Пост{media_info} запланирован в канал <b>{channel_title}</b> на <b>{aware_time.strftime('%d.%m.%Y %H:%M')}</b>.", 
-                        parse_mode='HTML'
+                        parse_mode=constants.ParseMode.HTML # <--- ИСПРАВЛЕНО
                     )
                 else:
                     await update.message.reply_text("❌ Ошибка при планировании поста (БД).")
@@ -497,7 +500,7 @@ class SchedulerBot:
                 context.user_data.clear()
 
             except (ValueError, TypeError):
-                await update.message.reply_text("❌ Неверный формат. Используйте <code>ГГГГ-ММ-ДД ЧЧ:ММ</code>.", parse_mode='HTML')
+                await update.message.reply_text("❌ Неверный формат. Используйте <code>ГГГГ-ММ-ДД ЧЧ:ММ</code>.", parse_mode=constants.ParseMode.HTML) # <--- ИСПРАВЛЕНО
 
 
         # 7. ОЖИДАНИЕ ID КАНАЛА ДЛЯ УСТАНОВКИ ПРОМПТА
@@ -516,7 +519,7 @@ class SchedulerBot:
                 await update.message.reply_text(
                     f"Отлично! Вы выбрали канал <b>{channel_info[2]}</b>.\n\n"
                     "Теперь отправьте **полный промпт (инструкцию)** для нейросети.",
-                    parse_mode='HTML'
+                    parse_mode=constants.ParseMode.HTML # <--- ИСПРАВЛЕНО
                 )
 
             except ValueError:
@@ -531,7 +534,7 @@ class SchedulerBot:
             if self.db.set_channel_prompt(tg_id, new_prompt):
                 await update.message.reply_text(
                     f"✅ Инструкция (промпт) для канала <code>{tg_id}</code> успешно сохранена!", 
-                    parse_mode='HTML'
+                    parse_mode=constants.ParseMode.HTML # <--- ИСПРАВЛЕНО
                 )
             else:
                 await update.message.reply_text("❌ Ошибка базы данных при сохранении промпта.")
@@ -570,4 +573,8 @@ def main():
     application.run_polling()
 
 if __name__ == '__main__':
+    # Убедитесь, что у вас установлена последняя версия:
+    # pip install python-telegram-bot --upgrade
+    # pip install pytz
     main()
+
