@@ -1,6 +1,10 @@
 import sqlite3
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
+import pytz
+
+# Настройка часового пояса для корректной работы с датами
+MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 
 class Database:
     def __init__(self, db_path='bot.db'):
@@ -12,7 +16,7 @@ class Database:
     
     def init_db(self):
         with self.get_connection() as conn:
-            # Таблица channels: добавлено default_prompt
+            # Таблица channels
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS channels (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -24,7 +28,7 @@ class Database:
                 )
             ''')
             
-            # Таблица posts: добавлены media_file_id и media_type
+            # Таблица posts
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS posts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -39,7 +43,7 @@ class Database:
                 )
             ''')
 
-            # НОВАЯ ТАБЛИЦА: ADMINS для динамического управления доступом
+            # Таблица admins
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS admins (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -48,15 +52,112 @@ class Database:
                     added_date DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+            
+            # НОВАЯ КРИТИЧЕСКИ ВАЖНАЯ ТАБЛИЦА: USERS для управления Премиум-доступом
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id INTEGER PRIMARY KEY UNIQUE,
+                    username TEXT,
+                    is_premium BOOLEAN DEFAULT 0,
+                    premium_until DATETIME DEFAULT NULL,
+                    last_activity DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
             conn.commit()
     
-    # --- МЕТОДЫ АДМИНИСТРАТОРОВ ---
+    # --- МЕТОДЫ УПРАВЛЕНИЯ ПОЛЬЗОВАТЕЛЯМИ (Премиум) ---
+
+    def get_or_create_user(self, user_id, username=None):
+        """Получает данные пользователя или создает новую запись, если ее нет."""
+        with self.get_connection() as conn:
+            try:
+                cursor = conn.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
+                user_data = cursor.fetchone()
+                
+                if user_data:
+                    # Обновляем имя и активность
+                    conn.execute('UPDATE users SET username = ?, last_activity = ? WHERE user_id = ?', 
+                                (username, datetime.now(MOSCOW_TZ).strftime('%Y-%m-%d %H:%M:%S'), user_id))
+                    conn.commit()
+                    # Заново получаем данные после обновления
+                    cursor = conn.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
+                    return cursor.fetchone()
+                else:
+                    # Создаем нового пользователя
+                    conn.execute(
+                        'INSERT INTO users (user_id, username) VALUES (?, ?)',
+                        (user_id, username)
+                    )
+                    conn.commit()
+                    cursor = conn.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
+                    return cursor.fetchone()
+            except Exception as e:
+                logging.error(f"Error getting/creating user {user_id}: {e}")
+                return None
+
+    def is_user_premium(self, user_id):
+        """Проверяет, активен ли премиум-доступ у пользователя."""
+        user_data = self.get_or_create_user(user_id)
+        if not user_data:
+            return False
+            
+        # user_data: 0-user_id, 1-username, 2-is_premium, 3-premium_until
+        is_premium_flag = bool(user_data[2])
+        premium_until_str = user_data[3]
+        
+        if is_premium_flag and premium_until_str:
+            try:
+                premium_until = datetime.strptime(premium_until_str, '%Y-%m-%d %H:%M:%S')
+                # Доступ активен, если дата окончания еще не наступила
+                return datetime.now() < premium_until 
+            except ValueError:
+                return False # Некорректная дата
+        
+        return False
+
+    def activate_premium(self, user_id, days: int, username=None):
+        """Активирует или продлевает премиум-доступ."""
+        user_data = self.get_or_create_user(user_id, username)
+        
+        # Определяем новую дату окончания
+        current_time = datetime.now(MOSCOW_TZ)
+        current_premium_until = current_time 
+
+        if user_data and user_data[3]: # Если есть старая дата
+            try:
+                # Парсим старую дату как наивную, а потом делаем ее aware (МСК)
+                old_until_naive = datetime.strptime(user_data[3], '%Y-%m-%d %H:%M:%S')
+                old_until_aware = MOSCOW_TZ.localize(old_until_naive)
+
+                # Если старый доступ не истек, продлеваем от старой даты
+                if old_until_aware > current_time:
+                    current_premium_until = old_until_aware
+            except ValueError:
+                pass # Пропускаем, если старая дата была некорректной
+
+        new_until = current_premium_until + timedelta(days=days)
+        new_until_str = new_until.strftime('%Y-%m-%d %H:%M:%S')
+        
+        with self.get_connection() as conn:
+            try:
+                conn.execute(
+                    'UPDATE users SET is_premium = 1, premium_until = ? WHERE user_id = ?',
+                    (new_until_str, user_id)
+                )
+                conn.commit()
+                # Возвращаем datetime объект новой даты для уведомления
+                return new_until.replace(tzinfo=None) 
+            except Exception as e:
+                logging.error(f"Error activating premium for user {user_id}: {e}")
+                return None
+
+
+    # --- МЕТОДЫ АДМИНИСТРАТОРОВ (Остались без изменений) ---
     
     def add_admin(self, user_id, username=None):
         """Добавляет пользователя в список администраторов."""
         with self.get_connection() as conn:
             try:
-                # INSERT OR IGNORE предотвращает ошибку, если админ уже есть
                 conn.execute(
                     'INSERT OR IGNORE INTO admins (user_id, username) VALUES (?, ?)',
                     (user_id, username)
@@ -73,23 +174,17 @@ class Database:
             cursor = conn.execute('SELECT user_id FROM admins')
             return [row[0] for row in cursor.fetchall()]
 
-    def is_admin(self, user_id):
-        """Проверяет, является ли пользователь администратором."""
-        # Этот метод не используется напрямую, но его логика встроена в bot.py через get_admin_ids
-        pass
-
     def get_admins(self):
         """Возвращает полный список администраторов (ID, username и т.д.)."""
         with self.get_connection() as conn:
             cursor = conn.execute('SELECT * FROM admins ORDER BY added_date')
             return cursor.fetchall()
     
-    # --- МЕТОДЫ КАНАЛОВ ---
+    # --- МЕТОДЫ КАНАЛОВ (Остались без изменений) ---
 
     def add_channel(self, channel_id, title, username):
         with self.get_connection() as conn:
             try:
-                # Вставка или замена существующего канала
                 conn.execute(
                     'INSERT OR REPLACE INTO channels (channel_id, title, username) VALUES (?, ?, ?)',
                     (channel_id, title, username)
@@ -102,7 +197,6 @@ class Database:
 
     def get_channels(self):
         with self.get_connection() as conn:
-            # Возвращаем все поля, включая default_prompt
             cursor = conn.execute('SELECT * FROM channels ORDER BY added_date')
             return cursor.fetchall()
 
@@ -132,7 +226,7 @@ class Database:
                 logging.error(f"Error setting prompt for channel {tg_channel_id}: {e}")
                 return False
 
-    # --- МЕТОДЫ ПОСТОВ ---
+    # --- МЕТОДЫ ПОСТОВ (Остались без изменений) ---
 
     def add_post(self, channel_id, message_text, scheduled_time, media_file_id=None, media_type=None):
         """Добавление поста с поддержкой медиафайлов."""
@@ -172,4 +266,4 @@ class Database:
             except Exception as e:
                 logging.error(f"Error updating post status: {e}")
                 return False
-
+ 
