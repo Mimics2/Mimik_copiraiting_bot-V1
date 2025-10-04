@@ -96,7 +96,7 @@ class Database:
                 return None
 
     def is_user_premium(self, user_id):
-        """Проверяет, активен ли премиум-доступ у пользователя."""
+        """Проверяет, активен ли премиум-доступ у пользователя. ИСПРАВЛЕНО ДЛЯ ОБРАБОТКИ None."""
         user_data = self.get_or_create_user(user_id)
         if not user_data:
             return False
@@ -105,13 +105,19 @@ class Database:
         is_premium_flag = bool(user_data[2])
         premium_until_str = user_data[3]
         
-        if is_premium_flag and premium_until_str:
+        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверяем, что premium_until_str является строкой (не None)
+        if is_premium_flag and isinstance(premium_until_str, str):
             try:
-                premium_until = datetime.strptime(premium_until_str, '%Y-%m-%d %H:%M:%S')
-                # Доступ активен, если дата окончания еще не наступила
-                return datetime.now() < premium_until 
+                # Парсим дату как naive (без TZ)
+                premium_until_naive = datetime.strptime(premium_until_str, '%Y-%m-%d %H:%M:%S')
+                # Делаем ее aware (МСК), чтобы корректно сравнить с текущим временем
+                premium_until_moscow = MOSCOW_TZ.localize(premium_until_naive)
+                
+                # Сравниваем aware дату с текущим aware временем МСК
+                return datetime.now(MOSCOW_TZ) < premium_until_moscow
             except ValueError:
-                return False # Некорректная дата
+                # Некорректная дата
+                return False 
         
         return False
 
@@ -152,7 +158,7 @@ class Database:
                 return None
 
 
-    # --- МЕТОДЫ АДМИНИСТРАТОРОВ (Остались без изменений) ---
+    # --- МЕТОДЫ АДМИНИСТРАТОРОВ ---
     
     def add_admin(self, user_id, username=None):
         """Добавляет пользователя в список администраторов."""
@@ -180,7 +186,7 @@ class Database:
             cursor = conn.execute('SELECT * FROM admins ORDER BY added_date')
             return cursor.fetchall()
     
-    # --- МЕТОДЫ КАНАЛОВ (Остались без изменений) ---
+    # --- МЕТОДЫ КАНАЛОВ ---
 
     def add_channel(self, channel_id, title, username):
         with self.get_connection() as conn:
@@ -226,7 +232,7 @@ class Database:
                 logging.error(f"Error setting prompt for channel {tg_channel_id}: {e}")
                 return False
 
-    # --- МЕТОДЫ ПОСТОВ (Остались без изменений) ---
+    # --- МЕТОДЫ ПОСТОВ ---
 
     def add_post(self, channel_id, message_text, scheduled_time, media_file_id=None, media_type=None):
         """Добавление поста с поддержкой медиафайлов."""
@@ -266,4 +272,3 @@ class Database:
             except Exception as e:
                 logging.error(f"Error updating post status: {e}")
                 return False
- 
