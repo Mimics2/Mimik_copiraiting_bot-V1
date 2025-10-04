@@ -4,6 +4,7 @@ import pytz
 import re 
 import httpx 
 import uuid 
+import traceback
 
 from telegram import Update, BotCommand, constants
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -191,13 +192,17 @@ class SchedulerBot:
         is_scheduler = self.is_user_scheduler(user_id)
         is_admin = self.is_user_admin(user_id)
 
-        # Вычисляем срок окончания доступа
+        # Вычисляем срок окончания доступа (ИСХОДЯ ИЗ ИСПРАВЛЕНИЯ В database.py)
         premium_until_str = "Нет доступа"
         if is_scheduler:
             user_data = self.db.get_or_create_user(user_id)
-            if user_data[3]: # premium_until
-                premium_until = datetime.strptime(user_data[3], '%Y-%m-%d %H:%M:%S')
-                premium_until_str = f"до {premium_until.strftime('%d.%m.%Y')}"
+            if user_data[3]: # premium_until (дата в формате строки)
+                # Безопасно парсим дату, так как db.is_user_premium уже подтвердила ее наличие и корректность
+                try:
+                    premium_until = datetime.strptime(user_data[3], '%Y-%m-%d %H:%M:%S')
+                    premium_until_str = f"до {premium_until.strftime('%d.%m.%Y')}"
+                except ValueError:
+                    premium_until_str = "Ошибка даты"
             
         
         header = f"🚀 **{constants.DEFAULT_BOT_NAME} - СИСТЕМА АВТОПОСТИНГА** 🚀\n\n"
@@ -260,15 +265,19 @@ class SchedulerBot:
             f"🕒 **МСК Время:** {datetime.now(MOSCOW_TZ).strftime('%d.%m.%Y %H:%M:%S')}\n"
         )
 
-        # Статус доступа
+        # Статус доступа (ИСПРАВЛЕНО ДЛЯ ОБРАБОТКИ None)
         if is_scheduler:
             user_data = self.db.get_or_create_user(user_id)
-            premium_until = datetime.strptime(user_data[3], '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
+            premium_until_str = user_data[3]
             
-            message += (
-                f"👤 **Ваш Доступ:** ✅ АКТИВЕН\n"
-                f"🗓 **Срок действия:** до {premium_until} (МСК)\n"
-            )
+            if premium_until_str:
+                premium_until = datetime.strptime(premium_until_str, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
+                message += (
+                    f"👤 **Ваш Доступ:** ✅ АКТИВЕН\n"
+                    f"🗓 **Срок действия:** до {premium_until} (МСК)\n"
+                )
+            else:
+                 message += f"👤 **Ваш Доступ:** ❌ НЕАКТИВЕН. (Ошибка данных). Используйте /buy для покупки.\n"
         else:
             message += f"👤 **Ваш Доступ:** ❌ НЕАКТИВЕН. Используйте /buy для покупки.\n"
 
@@ -585,7 +594,6 @@ class SchedulerBot:
 
 
     # --- КОМАНДЫ АДМИНА ---
-    # ... (Остальные команды админа) ...
     async def show_time(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Текущее Московское время: **{datetime.now(MOSCOW_TZ).strftime('%d.%m.%Y %H:%M:%S')}**", parse_mode=constants.ParseMode.MARKDOWN)
 
@@ -677,6 +685,25 @@ class SchedulerBot:
         self.db.update_post_status(post_id, 'published')
         logger.info(f"Пост ID {post_id} успешно опубликован в канале {tg_channel_id}.")
 
+# НОВЫЙ ОБРАБОТЧИК ОШИБОК для устранения сообщения в логах
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Логирует ошибки, вызванные обработчиками."""
+    logger.error("Произошло исключение: %s", context.error)
+    # Печатаем трассировку для отладки
+    tb_list = traceback.format_exception(None, context.error, context.error.__traceback__)
+    tb_string = ''.join(tb_list)
+    logger.error("Traceback:\n%s", tb_string)
+
+    # Опционально: Отправляем сообщение администратору о критической ошибке
+    if update:
+        chat_id = update.effective_chat.id
+        user_id = update.effective_user.id
+        error_message = f"🚨 ВАЖНО: В боте произошла ошибка при обработке команды от пользователя ID `{user_id}`. См. логи для подробностей."
+        try:
+             await context.bot.send_message(chat_id=chat_id, text="❌ Произошла внутренняя ошибка. Попробуйте снова или обратитесь к администратору.")
+        except:
+             pass # Не упасть, если не можем отправить сообщение об ошибке
+
 
 def main():
     """Запуск бота."""
@@ -712,6 +739,9 @@ def main():
 
     
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, bot.handle_message))
+
+    # РЕГИСТРАЦИЯ ОБРАБОТЧИКА ОШИБОК
+    application.add_error_handler(error_handler)
 
     logger.info("Бот запускается...")
     application.run_polling()
