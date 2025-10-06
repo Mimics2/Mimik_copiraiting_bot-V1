@@ -30,4 +30,4 @@ CRYPTO_CLOUD_CREATE_URL = "https://api.cryptocloud.plus/v2/invoice/create"
 
 # Секретный ключ WebHook (ОБЯЗАТЕЛЬНО ЗАМЕНИТЬ НА ВАШ СЕКРЕТ ИЗ CRYPTOCLOUD!)
 # Этот ключ должен быть установлен в настройках WebHook на CryptoCloud
-CRYPTO_CLOUD_WEBHOOK_SECRET = os.getenv('CRYPTO_CLOUD_WEBHOOK_SECRET', 'ZZXx1yruDrVObJXBvxqGh9AvqBgFazvC3Sht')
+CRYPTO_CLOUD_WEBHOOK_SECRET = os.getenv('CRYPTO_CLOUD_WEBHOOK_SECRET', 'IzSawGM1NhTjubTt1KXqyKoxLn5GyP9qrEuv')
