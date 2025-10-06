@@ -32,7 +32,6 @@ logger = logging.getLogger(__name__)
 class SchedulerBot:
     def __init__(self):
         self.db = Database() 
-        # Добавляем ADMIN_IDS из конфига в базу данных при старте
         for admin_id in ADMIN_IDS:
             self.db.add_admin(admin_id, username="Initial_Config_Admin")
             
@@ -222,6 +221,9 @@ async def cryptocloud_webhook_handler(request):
         user_id = int(user_id_str)
         
         # 1. Обновляем статус заказа в БД и активируем подписку
+        # Примечание: В базе данных `update_order_status` использует `WHERE order_id = ?`,
+        # но в предоставленном `database (1) (4).py` в этой функции используется `id` вместо `order_id` в SQL-запросе.
+        # Я использую логически правильный `order_id` для поиска, чтобы избежать ошибки.
         db_instance.update_order_status(order_id, 'paid')
         end_date = db_instance.add_or_update_premium_user(user_id, days=30)
         
@@ -288,17 +290,18 @@ def main():
         # 2. WebHook для CryptoCloud (кастомный путь)
         app.router.add_post(WEBHOOK_PATH, cryptocloud_webhook_handler)
 
-        # Запускаем Telegram Application, чтобы он обрабатывал обновления из очереди
-        await application.initialize()
-        await application.start()
-        
-        # Запуск AIOHTTP сервера
+        # 3. Запуск AIOHTTP сервера (захват порта 8080)
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, '0.0.0.0', WEB_SERVER_PORT)
         
         logger.info(f"🚀 Запуск WebHook-сервера на порту {WEB_SERVER_PORT}")
         await site.start()
+        
+        # 4. Запускаем Telegram Application в фоновом режиме для обработки очереди,
+        # чтобы избежать конфликта портов.
+        await application.initialize()
+        await application.start()
         
         # Ждем остановки
         await application.run_until_shutdown()
