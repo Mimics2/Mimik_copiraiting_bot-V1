@@ -25,7 +25,7 @@ WEBHOOK_URL = f"{WEB_SERVER_BASE_URL}{WEBHOOK_PATH}"
 
 # --- Настройки CryptoCloud (Криптовалютные платежи в USD) ---
 # ТВОЙ API-КЛЮЧ (Токен JWT) - ВАЖНО: ХРАНИТЬ В ПЕРЕМЕННЫХ ОКРУЖЕНИЯ НА RAILWAY
-CRYPTO_CLOUD_API_KEY = os.getenv('CRYPTO_CLOUD_API_KEY', 'EyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1dWlkIjoiTnpNeU5qTT0iLCJ0eXBlIjoicHJvamVjdCIsInYiOiIzNDgyYWM5OWEyMmM1YWNhZjUzMzYyNzBlMWE3N2QwMmMzNTNhYjYzMjFkYWM2Y2M1OGEwNmFkOGU1MmYwYzc1IiwiZXhwIjo4ODE1OTY1OTk1N30.CvtNWK4aUz3yimryjnBgfR54JCa2GW8AGpjiu902djI')
+CRYPTO_CLOUD_API_KEY = os.getenv('CRYPTO_CLOUD_API_KEY', 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1dWlkIjoiTnpNeU5qTT0iLCJ0eXBlIjoicHJvamVjdCIsInYiOiIzNDgyYWM5OWEyMmM1YWNhZjUzMzYyNzBlMWE3N2QwMmMzNTNhYjYzMjFkYWM2Y2M1OGEwNmFkOGU1MmYwYzc1IiwiZXhwIjo4ODE1OTY1OTk1N30.CvtNWK4aUz3yimryjnBgfR54JCa2GW8AGpjiu902djI')
 CRYPTO_CLOUD_CREATE_URL = "https://api.cryptocloud.plus/v2/invoice/create" 
 
 # Секретный ключ WebHook (ОБЯЗАТЕЛЬНО ЗАМЕНИТЬ НА ВАШ СЕКРЕТ ИЗ CRYPTOCLOUD!)
