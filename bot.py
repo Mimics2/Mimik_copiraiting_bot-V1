@@ -1,553 +1,598 @@
 import logging
-from datetime import datetime, timedelta
-import pytz
-import re 
-import httpx # Для асинхронных HTTP-запросов
-import uuid 
-import traceback
-import os
-import json
+import sqlite3
 import asyncio
+import datetime
+import uuid
+import httpx
+import json
+import traceback # Для более подробных логов ошибок в Webhook
 
-from telegram import Update, BotCommand, constants, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext, CallbackQueryHandler
-from aiohttp import web 
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+)
+from aiohttp import web
+from pytz import timezone
 
-from config import (BOT_TOKEN, ADMIN_IDS, CRYPTO_CLOUD_API_KEY, 
-                    CRYPTO_CLOUD_CREATE_URL, CRYPTO_CLOUD_WEBHOOK_SECRET, 
-                    WEB_SERVER_PORT, WEBHOOK_PATH, MOSCOW_TZ, WEB_SERVER_BASE_URL, WEBHOOK_URL)
+from config import (BOT_TOKEN, ADMIN_IDS, 
+                    WEB_SERVER_PORT, MOSCOW_TZ, WEB_SERVER_BASE_URL,
+                    CRYPTOPAY_BOT_TOKEN, CRYPTOPAY_WEBHOOK_PATH, CRYPTOPAY_CREATE_INVOICE_URL,
+                    DB_NAME) # DB_NAME тоже добавил в импорт, если он используется ниже
+
 from database import Database
 
-# --- Настройка логирования ---
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+# Настройка логирования
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- Основной класс Бота ---
 
 class SchedulerBot:
-    def __init__(self):
-        self.db = Database() 
-        for admin_id in ADMIN_IDS:
-            self.db.add_admin(admin_id, username="Initial_Config_Admin")
-            
-        self.start_time = datetime.now(MOSCOW_TZ)
-        self.user_states = {}
-        # Загрузка admin_ids из базы на старте
-        self.admin_ids = self.db.get_admin_ids() 
+    def __init__(self, db_name):
+        self.db = Database(db_name)
+        self.user_states = {} # Для хранения состояний пользователей
+        self.post_data = {} # Для хранения данных поста во время создания
+        self.application = None # Будет установлено в main()
+        self.publisher_task = None # Для задачи публикации
 
-    # --- ПРОВЕРКИ ДОСТУПА ---
+    def set_application(self, application):
+        self.application = application
 
+    # --- Хелперы ---
     def is_user_admin(self, user_id):
-        # Обновляем список админов на случай изменений
-        self.admin_ids = self.db.get_admin_ids() 
-        return user_id in self.admin_ids
+        return user_id in ADMIN_IDS
 
-    # --- СТАРТ / СТАТУС ---
+    def get_moscow_time(self):
+        return datetime.datetime.now(MOSCOW_TZ)
 
+    # --- Команды ---
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        
-        if not self.is_user_admin(user_id):
-            await update.message.reply_text("❌ У вас нет доступа к этому боту")
-            return
-        
-        commands = [
-            BotCommand("start", "Запуск бота"),
-            BotCommand("status", "Статус бота и время"),
-            BotCommand("add_channel", "Добавить канал"),
-            BotCommand("channels", "Список каналов"),
-            BotCommand("add_post", "Добавить публикацию"),
-            BotCommand("posts", "Список публикаций"),
-            BotCommand("deposit", "Пополнить баланс"),
-            BotCommand("balance", "Посмотреть баланс"), # Добавил команду balance
-        ]
-        
-        await context.bot.set_my_commands(commands)
-        
-        balance = self.db.get_user_balance(user_id)
-        
-        message = (
-            f"✅ Бот-планировщик запущен!\n"
-            f"👤 Вы вошли как **Администратор**.\n"
-            f"💰 Ваш баланс: **{balance:.2f} USD**.\n"
-            f"⚙️ Используйте команды ниже, чтобы управлять публикациями."
-        )
-        await update.message.reply_text(message, parse_mode='Markdown')
-
-    async def show_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.is_user_admin(update.effective_user.id):
-            return
-        
-        uptime = datetime.now(MOSCOW_TZ) - self.start_time
-        
-        hours, remainder = divmod(int(uptime.total_seconds()), 3600)
-        minutes, seconds = divmod(remainder, 60)
-        
-        status_message = (
-            f"🤖 Статус: **РАБОТАЕТ**\n"
-            f"🕰️ Запущен: {self.start_time.strftime('%d.%m.%Y %H:%M:%S')} МСК\n"
-            f"⏱️ Время работы: {uptime.days} дн., {hours} ч., {minutes} мин."
-        )
-        await update.message.reply_text(status_message, parse_mode='Markdown')
-
-    async def show_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.is_user_admin(update.effective_user.id):
-            return
-        
-        user_id = update.effective_user.id
-        balance = self.db.get_user_balance(user_id)
-        
+        user = update.effective_user
+        self.db.add_user(user.id, user.username) # Добавляем пользователя, если его нет
         await update.message.reply_text(
-            f"💰 Ваш текущий баланс: **{balance:.2f} USD**.",
-            parse_mode='Markdown'
+            f"Привет, {user.first_name}!\n"
+            "Я бот для отложенного постинга в Telegram-каналах.\n"
+            "Используйте /help для списка команд."
         )
 
-    # --- УПРАВЛЕНИЕ КАНАЛАМИ ---
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        help_text = (
+            "Вот команды, которые я понимаю:\n"
+            "/add_channel - Добавить канал для постинга.\n"
+            "/my_channels - Показать мои привязанные каналы.\n"
+            "/remove_channel - Отвязать канал.\n"
+            "/schedule_post - Запланировать новый пост.\n"
+            "/my_posts - Показать мои запланированные посты.\n"
+            "/cancel_post - Отменить запланированный пост.\n"
+            "/balance - Проверить баланс.\n"
+            "/deposit - Пополнить баланс.\n"
+            # "/buy_tariff - Купить тариф." # <-- Если у вас есть эта команда
+        )
+        await update.message.reply_text(help_text)
 
+    # --- Управление каналами ---
     async def add_channel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.is_user_admin(update.effective_user.id):
+        user_id = update.effective_user.id
+        user_info = self.db.get_user(user_id)
+        if not user_info:
+            await update.message.reply_text("Пожалуйста, сначала используйте /start.")
+            return
+
+        current_channels = self.db.get_user_channels(user_id)
+        # Получаем max_channels из user_info (индекс 6)
+        max_channels = user_info[6] if user_info and user_info[6] is not None else 1 
+
+        if len(current_channels) >= max_channels:
+            await update.message.reply_text(f"❌ Вы достигли лимита каналов для вашего тарифа ({max_channels}).")
             return
 
         await update.message.reply_text(
-            "Напишите @username или ID (цифрами) канала, куда нужно постить, "
-            "и **предварительно добавьте меня туда администратором**."
+            "Чтобы добавить канал, сначала добавьте меня как администратора в ваш канал с правами на публикацию сообщений.\n"
+            "Затем перешлите мне любое сообщение из этого канала."
         )
-        self.user_states[update.effective_user.id] = 'awaiting_channel'
+        self.user_states[user_id] = {'stage': 'awaiting_channel_forward'}
 
-    async def list_channels(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.is_user_admin(update.effective_user.id):
-            return
-        
-        channels = self.db.get_all_channels()
-        
+    async def my_channels(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        channels = self.db.get_user_channels(user_id)
         if not channels:
-            await update.message.reply_text("Нет добавленных каналов.")
+            await update.message.reply_text("У вас пока нет привязанных каналов. Используйте /add_channel.")
             return
 
-        message = "📋 **Добавленные каналы:**\n\n"
-        for i, channel in enumerate(channels, 1):
-            channel_id, title, username = channel[1], channel[2], channel[3]
-            
-            # Если title не указан (напр., для ID), используем username/ID
-            name = title if title else (f"@{username}" if username else str(channel_id))
-            
-            message += f"{i}. **{name}** (ID: `{channel_id}`)\n"
-            
-        await update.message.reply_text(message, parse_mode='Markdown')
+        response_text = "Ваши привязанные каналы:\n"
+        for channel_id, channel_name in channels:
+            response_text += f"- **{channel_name}** (`{channel_id}`)\n"
+        await update.message.reply_text(response_text, parse_mode='Markdown')
 
-    # --- ЗАПЛАНИРОВАННЫЕ ПУБЛИКАЦИИ ---
-
-    async def add_post(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.is_user_admin(update.effective_user.id):
-            return
-
-        channels = self.db.get_all_channels()
-        
+    async def remove_channel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        channels = self.db.get_user_channels(user_id)
         if not channels:
-            await update.message.reply_text(
-                "❌ Сначала добавьте канал командой /add_channel."
-            )
+            await update.message.reply_text("У вас нет привязанных каналов для удаления.")
             return
 
-        buttons = []
-        for channel in channels:
-            channel_id, title, username = channel[1], channel[2], channel[3]
-            name = title if title else (f"@{username}" if username else str(channel_id))
-            buttons.append([InlineKeyboardButton(name, callback_data=f"select_channel_{channel_id}")])
+        keyboard = []
+        for channel_id, channel_name in channels:
+            keyboard.append([InlineKeyboardButton(channel_name, callback_data=f"remove_channel_{channel_id}")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
 
-        reply_markup = InlineKeyboardMarkup(buttons)
-        await update.message.reply_text("Выберите канал для публикации:", reply_markup=reply_markup)
+        await update.message.reply_text("Выберите канал для удаления:", reply_markup=reply_markup)
+        self.user_states[user_id] = {'stage': 'awaiting_channel_for_removal'}
 
-        self.user_states[update.effective_user.id] = {'stage': 'awaiting_channel_for_post', 'data': {}}
-
-
-    async def list_posts(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.is_user_admin(update.effective_user.id):
+    # --- Планирование постов ---
+    async def schedule_post(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        channels = self.db.get_user_channels(user_id)
+        if not channels:
+            await update.message.reply_text("У вас нет привязанных каналов. Сначала используйте /add_channel.")
             return
 
-        posts = self.db.get_scheduled_posts()
+        # Проверка лимита постов
+        user_info = self.db.get_user(user_id)
+        if not user_info:
+            await update.message.reply_text("Ошибка: Пользователь не найден. Пожалуйста, начните с /start.")
+            return
         
+        # Получаем количество опубликованных постов за сегодня
+        today_posts_count = 0 # В реальном приложении здесь нужна функция db.get_user_posts_today(user_id)
+        max_posts_per_day = user_info[7] if user_info and user_info[7] is not None else 2 # Индекс 7 - max_posts_per_day
+
+        if today_posts_count >= max_posts_per_day:
+            await update.message.reply_text(f"❌ Вы достигли лимита постов на сегодня ({max_posts_per_day}) для вашего тарифа.")
+            return
+
+        keyboard = []
+        for channel_id, channel_name in channels:
+            keyboard.append([InlineKeyboardButton(channel_name, callback_data=f"schedule_channel_{channel_id}")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await update.message.reply_text("Выберите канал, в который вы хотите запланировать пост:", reply_markup=reply_markup)
+        self.user_states[user_id] = {'stage': 'awaiting_post_channel_selection'}
+
+    async def my_posts(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        posts = self.db.get_user_posts(user_id)
         if not posts:
-            await update.message.reply_text("Нет запланированных публикаций.")
+            await update.message.reply_text("У вас нет запланированных постов.")
             return
-        
-        # Получаем структуру: (post_id, channel_id, message_text, scheduled_time_str, status, created_date, media_file_id, media_type, channel_title, tg_channel_id)
-        current_time = datetime.now(MOSCOW_TZ)
-        message = f"📋 **Запланированные публикации** (МСК):\\n\\n"
-        
-        for post in posts:
-            post_id, db_channel_id, message_text, scheduled_time_str, status, created_date, media_file_id, media_type, channel_title, tg_channel_id = post
-            
-            # Конвертируем время в объект datetime и локализуем его
-            try:
-                post_time_utc = datetime.strptime(scheduled_time_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=pytz.utc)
-            except ValueError:
-                # Если формат времени в базе неверен, пропускаем
-                continue 
-            
-            moscow_time = post_time_utc.astimezone(MOSCOW_TZ)
-            time_str = moscow_time.strftime('%d.%m.%Y %H:%M')
-            
-            channel_name = channel_title if channel_title else str(tg_channel_id)
-            
-            # Обрезаем текст для превью
-            text_preview = message_text.split('\n')[0][:50] + "..." if message_text and len(message_text) > 50 else (message_text or " [Текст отсутствует] ")
-            media_info = f" ({media_type.upper()})" if media_type else ""
-            
-            message += f"• `{post_id}`: **{time_str}** в **{channel_name}**{media_info} - {text_preview}\n"
-        
-        await update.message.reply_text(message, parse_mode='Markdown')
 
-    # --- КРИПТОВАЛЮТНЫЕ ПЛАТЕЖИ (DEPOSIT) ---
-    
+        response_text = "Ваши запланированные посты:\n"
+        keyboard = []
+        for post_id, channel_id, text, publish_time, is_published in posts:
+            channel_info = self.db.get_channel_info(channel_id)
+            channel_name = channel_info[3] if channel_info else f"Канал ID: {channel_id}"
+            status = "✅ Опубликован" if is_published else "⏳ В ожидании"
+            response_text += (
+                f"\n**ID:** {post_id}\n"
+                f"**Канал:** {channel_name}\n"
+                f"**Время:** {publish_time.astimezone(MOSCOW_TZ).strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"**Статус:** {status}\n"
+                f"**Текст:** {text[:50]}...\n"
+            )
+            if not is_published:
+                keyboard.append([InlineKeyboardButton(f"Отменить пост {post_id}", callback_data=f"cancel_post_{post_id}")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(response_text, parse_mode='Markdown', reply_markup=reply_markup)
+
+    async def cancel_post(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        posts = self.db.get_user_posts(user_id)
+        
+        pending_posts = [p for p in posts if not p[4]] # p[4] это is_published
+        
+        if not pending_posts:
+            await update.message.reply_text("У вас нет запланированных постов для отмены.")
+            return
+
+        keyboard = []
+        for post_id, channel_id, text, publish_time, is_published in pending_posts:
+            channel_info = self.db.get_channel_info(channel_id)
+            channel_name = channel_info[3] if channel_info else f"Канал ID: {channel_id}"
+            keyboard.append([InlineKeyboardButton(f"Отменить пост {post_id} ({channel_name} на {publish_time.astimezone(MOSCOW_TZ).strftime('%H:%M')})", callback_data=f"cancel_post_{post_id}")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text("Выберите пост для отмены:", reply_markup=reply_markup)
+
+
+    # --- Баланс и Пополнение ---
+    async def show_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        balance = self.db.get_user_balance(user_id)
+        await update.message.reply_text(f"💰 Ваш текущий баланс: **{balance:.2f} USD**", parse_mode='Markdown')
+
     async def deposit(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.is_user_admin(update.effective_user.id):
+        user_id = update.effective_user.id
+        if not self.is_user_admin(user_id): # Можно убрать is_user_admin для обычных пользователей
+            await update.message.reply_text("Для пополнения баланса обратитесь к администратору.")
             return
         
         await update.message.reply_text(
             "💸 Введите сумму в **USD**, на которую хотите пополнить баланс. "
-            "Минимальная сумма - 1 USD."
+            "Минимальная сумма - 1 USD. Оплата будет производиться через **CryptoPay Bot (USDT)**.",
+            parse_mode='Markdown'
         )
-        self.user_states[update.effective_user.id] = {'stage': 'awaiting_deposit_amount'}
+        self.user_states[user_id] = {'stage': 'awaiting_deposit_amount_cryptopay'}
 
-    async def process_deposit_amount(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # --- Обработчик текстовых сообщений ---
+    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
+        message_text = update.message.text
         
-        if self.user_states.get(user_id, {}).get('stage') != 'awaiting_deposit_amount':
-            return
-        
-        try:
-            amount = float(update.message.text)
-            if amount < 1.0:
-                await update.message.reply_text("❌ Сумма должна быть не меньше 1 USD. Попробуйте снова.")
-                return
-        except ValueError:
-            await update.message.reply_text("❌ Введите корректную сумму числом. Попробуйте снова.")
-            return
+        current_state = self.user_states.get(user_id, {}).get('stage')
 
+        if current_state == 'awaiting_channel_forward':
+            if update.message.forward_from_chat and update.message.forward_from_chat.type == 'channel':
+                channel_id = update.message.forward_from_chat.id
+                channel_name = update.message.forward_from_chat.title
+
+                # Проверить, что бот является админом в этом канале
+                try:
+                    chat_member = await context.bot.get_chat_member(channel_id, self.application.bot.id)
+                    if not chat_member.can_post_messages:
+                        await update.message.reply_text(
+                            "❌ Бот должен быть администратором канала с правом на публикацию сообщений."
+                        )
+                        self.user_states.pop(user_id, None)
+                        return
+                except Exception as e:
+                    logging.error(f"Error checking bot admin status in channel {channel_id}: {e}")
+                    await update.message.reply_text(
+                        "❌ Не удалось проверить права бота в канале. Убедитесь, что бот добавлен как администратор."
+                    )
+                    self.user_states.pop(user_id, None)
+                    return
+
+                if self.db.add_channel(user_id, channel_id, channel_name):
+                    await update.message.reply_text(f"✅ Канал **{channel_name}** (`{channel_id}`) успешно добавлен!", parse_mode='Markdown')
+                else:
+                    await update.message.reply_text("❌ Канал уже был добавлен или произошла ошибка.")
+                self.user_states.pop(user_id, None)
+            else:
+                await update.message.reply_text("❌ Пожалуйста, перешлите сообщение именно из канала.")
+        
+        elif current_state == 'awaiting_post_text':
+            self.post_data[user_id]['text'] = message_text
+            await update.message.reply_text(
+                "Отлично! Теперь отправьте мне медиафайл (фото или видео), который хотите прикрепить к посту.\n"
+                "Если пост без медиа, просто отправьте `-` (дефис)."
+            )
+            self.user_states[user_id] = {'stage': 'awaiting_post_media'}
+
+        elif current_state == 'awaiting_post_time':
+            try:
+                # Ожидаем время в формате ГГГГ-ММ-ДД ЧЧ:ММ (МСК)
+                publish_time_str = message_text
+                publish_time_msk = MOSCOW_TZ.localize(datetime.datetime.strptime(publish_time_str, '%Y-%m-%d %H:%M'))
+                publish_time_utc = publish_time_msk.astimezone(pytz.utc)
+
+                if publish_time_utc <= datetime.datetime.now(pytz.utc):
+                    await update.message.reply_text("❌ Время публикации должно быть в будущем. Попробуйте снова.")
+                    return
+
+                channel_id = self.post_data[user_id]['channel_id']
+                text = self.post_data[user_id]['text']
+                media_ids = json.dumps(self.post_data[user_id].get('media_ids', []))
+
+                self.db.add_post(user_id, channel_id, text, media_ids, publish_time_utc)
+                await update.message.reply_text(
+                    f"✅ Пост успешно запланирован в канал `{channel_id}` на "
+                    f"**{publish_time_msk.strftime('%Y-%m-%d %H:%M:%S')} МСК**!",
+                    parse_mode='Markdown'
+                )
+                self.user_states.pop(user_id, None)
+                self.post_data.pop(user_id, None)
+
+            except ValueError:
+                await update.message.reply_text(
+                    "❌ Неверный формат времени. Пожалуйста, введите в формате ГГГГ-ММ-ДД ЧЧ:ММ (например, 2023-12-31 15:30)."
+                )
+            except Exception as e:
+                logging.error(f"Error scheduling post: {e}")
+                await update.message.reply_text("❌ Произошла ошибка при планировании поста.")
+
+        elif current_state == 'awaiting_deposit_amount_cryptopay':
+            await self.process_deposit_amount(update, context)
+
+    # --- Обработчик медиа ---
+    async def handle_media(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        current_state = self.user_states.get(user_id, {}).get('stage')
+
+        if current_state == 'awaiting_post_media':
+            media_ids = []
+            if update.message.photo:
+                # Telegram отправляет несколько размеров, берем последний (самый большой)
+                media_ids.append(update.message.photo[-1].file_id)
+            elif update.message.video:
+                media_ids.append(update.message.video.file_id)
+            elif update.message.text and update.message.text == '-': # Если пользователь отправил '-', значит без медиа
+                pass # media_ids останется пустым
+            else:
+                await update.message.reply_text("❌ Пожалуйста, отправьте фото, видео или '-' для поста без медиа.")
+                return
+            
+            self.post_data[user_id]['media_ids'] = media_ids
+            await update.message.reply_text(
+                "Теперь введите дату и время публикации поста (МСК) в формате ГГГГ-ММ-ДД ЧЧ:ММ "
+                "(например, 2023-12-31 15:30):"
+            )
+            self.user_states[user_id] = {'stage': 'awaiting_post_time'}
+        else:
+            await update.message.reply_text("Я не знаю, что делать с этим медиафайлом сейчас. Возможно, вы не в процессе создания поста.")
+
+
+    # --- Обработчик callback-запросов ---
+    async def handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        user_id = query.from_user.id
+        data = query.data
+
+        await query.answer() # Всегда отвечаем на callback-запрос
+
+        if data.startswith('remove_channel_'):
+            channel_id = int(data.split('_')[2])
+            self.db.remove_channel(user_id, channel_id)
+            await query.edit_message_text(f"✅ Канал `{channel_id}` успешно удален.")
+            self.user_states.pop(user_id, None)
+
+        elif data.startswith('schedule_channel_'):
+            channel_id = int(data.split('_')[2])
+            self.post_data[user_id] = {'channel_id': channel_id}
+            await query.edit_message_text("Отлично! Теперь отправьте текст вашего поста.")
+            self.user_states[user_id] = {'stage': 'awaiting_post_text'}
+
+        elif data.startswith('cancel_post_'):
+            post_id = int(data.split('_')[2])
+            post_info = self.db.get_post_info(post_id)
+            if post_info and post_info[1] == user_id: # Проверяем, что пост принадлежит пользователю
+                self.db.delete_post(post_id)
+                await query.edit_message_text(f"✅ Пост с ID `{post_id}` успешно отменен.")
+            else:
+                await query.edit_message_text("❌ Пост не найден или у вас нет прав на его отмену.")
+
+
+    # --- Логика публикации по расписанию ---
+    async def publish_scheduled_posts(self):
+        while True:
+            await asyncio.sleep(60) # Проверять каждую минуту
+            
+            posts_to_publish = self.db.get_posts_to_publish()
+            for post_id, user_id, channel_id, text, media_ids_str in posts_to_publish:
+                try:
+                    media_ids = json.loads(media_ids_str) if media_ids_str else []
+                    
+                    if media_ids:
+                        media_group = []
+                        if len(media_ids) == 1: # Один медиафайл
+                            file_id = media_ids[0]
+                            if text:
+                                # Если есть текст, отправляем фото/видео с подписью
+                                if len(file_id) > 20: # Простая проверка на file_id (обычно они длинные)
+                                    try:
+                                        if await self.is_file_video(file_id): # Нужна функция для определения типа медиа
+                                            message = await self.application.bot.send_video(
+                                                chat_id=channel_id, video=file_id, caption=text, parse_mode='Markdown'
+                                            )
+                                        else:
+                                            message = await self.application.bot.send_photo(
+                                                chat_id=channel_id, photo=file_id, caption=text, parse_mode='Markdown'
+                                            )
+                                    except Exception as e:
+                                        logging.error(f"Error determining media type or sending single media: {e}")
+                                        message = await self.application.bot.send_message(chat_id=channel_id, text=text, parse_mode='Markdown') # Отправляем только текст
+                                else:
+                                    message = await self.application.bot.send_message(chat_id=channel_id, text=text, parse_mode='Markdown') # Если file_id короткий, это скорее всего текст
+                            else: # Один медиафайл без текста
+                                if len(file_id) > 20:
+                                    if await self.is_file_video(file_id):
+                                        message = await self.application.bot.send_video(chat_id=channel_id, video=file_id)
+                                    else:
+                                        message = await self.application.bot.send_photo(chat_id=channel_id, photo=file_id)
+                                else:
+                                    message = await self.application.bot.send_message(chat_id=channel_id, text=text if text else "Пост без текста") # На всякий случай
+                        else: # Несколько медиафайлов (media_group)
+                            # Первый медиафайл с текстом
+                            if len(media_ids[0]) > 20:
+                                if await self.is_file_video(media_ids[0]):
+                                    media_group.append(InputMediaVideo(media=media_ids[0], caption=text, parse_mode='Markdown'))
+                                else:
+                                    media_group.append(InputMediaPhoto(media=media_ids[0], caption=text, parse_mode='Markdown'))
+                            else: # Если file_id короткий, это ошибка или не файл
+                                media_group.append(InputMediaPhoto(media=media_ids[0])) # Без текста, если ошибка
+
+                            # Остальные медиафайлы без текста
+                            for mid in media_ids[1:]:
+                                if len(mid) > 20:
+                                    if await self.is_file_video(mid):
+                                        media_group.append(InputMediaVideo(media=mid))
+                                    else:
+                                        media_group.append(InputMediaPhoto(media=mid))
+                            
+                            messages = await self.application.bot.send_media_group(chat_id=channel_id, media=media_group)
+                            message = messages[0] if messages else None # Берем первое сообщение из группы
+                    else: # Пост без медиа
+                        message = await self.application.bot.send_message(chat_id=channel_id, text=text, parse_mode='Markdown')
+
+                    if message:
+                        self.db.set_post_published(post_id, message.message_id)
+                        logging.info(f"Post {post_id} published to {channel_id}.")
+                    else:
+                        logging.error(f"Failed to get message_id for post {post_id}.")
+
+                except Exception as e:
+                    logging.error(f"Error publishing post {post_id} to {channel_id}: {traceback.format_exc()}")
+                    # Можно добавить уведомление пользователю об ошибке публикации
+
+    # Простая заглушка для определения типа медиа. В идеале нужно делать запрос к Telegram API.
+    # Для большинства случаев, просто по file_id или extension не определить, нужно getFile.
+    async def is_file_video(self, file_id: str) -> bool:
+        """
+        Пытается определить, является ли file_id видео.
+        Это очень упрощенная логика, в идеале нужно получить информацию о файле через Telegram API.
+        """
+        # Обычно file_id видео начинаются с 'BAAD' или имеют другие отличия.
+        # Это лишь предположение, которое может быть неточным.
+        # Лучший способ: context.bot.get_file(file_id) и проверить file.mime_type
+        try:
+            file_info = await self.application.bot.get_file(file_id)
+            return 'video' in file_info.mime_type
+        except Exception:
+            return False
+
+
+    # --- НОВЫЙ ФУНКЦИОНАЛ ДЛЯ CRYPTOPAY BOT ---
+    async def create_cryptopay_invoice(self, user_id, amount, update: Update):
         order_id = str(uuid.uuid4())
         
-        headers = {
-            "Authorization": f"Token {CRYPTO_CLOUD_API_KEY}",
-            "Content-Type": "application/json"
-        }
+        auth = httpx.BasicAuth(username='', password=CRYPTOPAY_BOT_TOKEN) 
         
         payload = {
+            "asset": "USDT", 
             "amount": amount,
-            "currency": "USD",
-            "order_id": order_id,
-            "shop_id": "0",
-            "period": 10,
-            "webhook_url": WEBHOOK_URL,
-            "success_url": WEB_SERVER_BASE_URL
+            "description": f"Пополнение баланса KolesContent (ID: {user_id})",
+            "external_id": order_id, 
+            "return_url": WEB_SERVER_BASE_URL
         }
         
         async with httpx.AsyncClient() as client:
             try:
-                response = await client.post(CRYPTO_CLOUD_CREATE_URL, headers=headers, json=payload)
+                response = await client.post(CRYPTOPAY_CREATE_INVOICE_URL, json=payload, auth=auth)
                 data = response.json()
                 
-                if response.status_code == 200 and data.get('status') == 'success':
+                if response.status_code == 200 and data.get('ok') and data['result'].get('pay_url'):
                     pay_url = data['result']['pay_url']
                     
-                    self.db.add_payment(user_id, amount, order_id, 'pending', pay_url)
+                    self.db.add_payment(user_id, amount, order_id, 'pending', pay_url, 'cryptopay') 
                     
                     keyboard = [[InlineKeyboardButton("💳 Перейти к оплате", url=pay_url)]]
                     reply_markup = InlineKeyboardMarkup(keyboard)
                     
                     await update.message.reply_text(
-                        f"💰 Создан счет на пополнение на **{amount} USD**.\n"
+                        f"💰 Создан счет на пополнение на **{amount} USDT**.\n"
                         f"🔗 Перейдите по ссылке ниже для оплаты:",
                         reply_markup=reply_markup,
                         parse_mode='Markdown'
                     )
                 else:
-                    logger.error(f"CryptoCloud error: {data}")
-                    await update.message.reply_text(f"❌ Не удалось создать счет для оплаты. Ошибка: {data.get('message', response.text)}")
+                    logging.error(f"CryptoPay Bot invoice creation error: {data}")
+                    await update.message.reply_text(f"❌ Не удалось создать счет для оплаты. Ошибка: {data.get('error', response.text)}")
                     
             except Exception as e:
-                logger.error(f"HTTP error during deposit: {e}")
+                logging.error(f"HTTP error during deposit with CryptoPay Bot: {e}")
                 await update.message.reply_text("❌ Произошла ошибка при связи с платежной системой.")
 
-        self.user_states.pop(user_id, None)
 
-    # --- Обработка ВСЕХ сообщений ---
-
-    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        
-        if not self.is_user_admin(user_id):
-            return
-
-        state = self.user_states.get(user_id, {}).get('stage')
-        state_data = self.user_states.get(user_id, {}).get('data', {})
-
-        if state == 'awaiting_channel':
-            # --- Обработка добавления канала ---
-            text = update.message.text.strip()
-            channel_identifier = text.replace('@', '')
-            
-            try:
-                chat = await context.bot.get_chat(channel_identifier)
-                
-                if chat.type not in [constants.ChatType.CHANNEL, constants.ChatType.SUPERGROUP]:
-                    await update.message.reply_text("❌ Это не похоже на канал. Убедитесь, что это публичный канал или ваш бот добавлен в него как администратор.")
-                    return
-                
-                # Проверка, что бот является администратором (Упрощенная проверка)
-                try:
-                    me = await context.bot.get_me()
-                    chat_member = await context.bot.get_chat_member(chat.id, me.id)
-                    if chat_member.status not in [constants.ChatMember.ADMINISTRATOR, constants.ChatMember.CREATOR]:
-                        await update.message.reply_text("❌ Сначала сделайте бота администратором в этом канале.")
-                        return
-                except Exception:
-                    await update.message.reply_text("⚠️ Не удалось проверить права бота. Убедитесь, что бот является администратором, иначе постинг не сработает.")
-
-                
-                self.db.add_channel(
-                    channel_id=chat.id, 
-                    title=chat.title, 
-                    username=chat.username
-                )
-                
-                await update.message.reply_text(f"✅ Канал **{chat.title}** (ID: `{chat.id}`) успешно добавлен!", parse_mode='Markdown')
-                self.user_states.pop(user_id) 
-                
-            except Exception as e:
-                logger.error(f"Error adding channel: {traceback.format_exc()}")
-                await update.message.reply_text(
-                    "❌ Не удалось получить информацию о канале. "
-                    "Убедитесь, что:\n"
-                    "1. Вы ввели верный @username или ID.\n"
-                    "2. Бот добавлен в этот канал как администратор."
-                )
-        
-        elif state == 'awaiting_deposit_amount':
-            await self.process_deposit_amount(update, context)
-
-        elif state == 'awaiting_post_text':
-            # --- Обработка текста поста ---
-            
-            state_data['text'] = update.message.text
-            self.user_states[user_id]['stage'] = 'awaiting_post_time'
-            
-            await update.message.reply_text(
-                "📅 Введите **дату и время** публикации в формате `ГГГГ-ММ-ДД ЧЧ:ММ` (например, `2025-10-10 14:30`) "
-                "по Московскому времени (МСК)."
-            )
-
-        elif state == 'awaiting_post_time':
-            # --- Обработка времени поста ---
-            
-            time_str = update.message.text.strip()
-            
-            try:
-                # Парсим время
-                post_datetime = datetime.strptime(time_str, '%Y-%m-%d %H:%M')
-                # Добавляем часовой пояс МСК
-                post_datetime_moscow = MOSCOW_TZ.localize(post_datetime)
-                
-                # Конвертируем в UTC для хранения в базе
-                post_datetime_utc = post_datetime_moscow.astimezone(pytz.utc)
-                
-                # Проверка, что время не в прошлом
-                if post_datetime_moscow <= datetime.now(MOSCOW_TZ) + timedelta(minutes=1):
-                    await update.message.reply_text(
-                        "❌ Время публикации должно быть хотя бы на 1 минуту в будущем. Попробуйте снова."
-                    )
-                    return
-                
-                # Финализируем пост
-                channel_id_tg = state_data['channel_id_tg']
-                
-                channel_data = self.db.get_channel_by_tg_id(channel_id_tg)
-                if not channel_data:
-                    await update.message.reply_text("❌ Ошибка: Выбранный канал не найден в базе. Начните сначала.")
-                    self.user_states.pop(user_id)
-                    return
-                
-                db_channel_id = channel_data[0] # Внутренний ID канала в БД
-                
-                post_id = self.db.add_post(
-                    channel_id=db_channel_id, 
-                    message_text=state_data.get('text', ''), 
-                    scheduled_time=post_datetime_utc,
-                )
-                
-                if post_id:
-                    await update.message.reply_text(
-                        f"✅ Публикация **#{post_id}** успешно **запланирована**!\n"
-                        f"Канал: **{channel_data[2]}**\n"
-                        f"Время (МСК): **{post_datetime_moscow.strftime('%d.%m.%Y %H:%M')}**\n\n"
-                        "Текст:\n"
-                        f"```\\n{state_data.get('text', '')[:200]}...\\n```"
-                    , parse_mode='Markdown')
-                else:
-                    await update.message.reply_text("❌ Ошибка при сохранении публикации в базу.")
-                
-                self.user_states.pop(user_id) # Очищаем состояние
-                
-            except ValueError:
-                await update.message.reply_text(
-                    "❌ Неверный формат даты/времени. Пожалуйста, используйте `ГГГГ-ММ-ДД ЧЧ:ММ`."
-                )
-
-    # --- Обработка НАЖАТИЙ КНОПОК ---
+# --- Webhook handler для CryptoPay Bot (ВНЕ КЛАССА SchedulerBot) ---
+async def cryptopay_webhook_handler(request):
+    application = request.app['bot_app']
+    bot_logic = application.bot_logic 
     
-    async def handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        query = update.callback_query
-        user_id = query.from_user.id
-        
-        await query.answer()
-
-        if not self.is_user_admin(user_id):
-            return
-
-        data = query.data
-        
-        if data.startswith('select_channel_'):
-            # --- Выбор канала для постинга ---
-            try:
-                channel_id_tg = int(data.split('_')[-1])
-            except ValueError:
-                await query.edit_message_text("❌ Ошибка при выборе канала. Попробуйте снова.")
-                return
-            
-            # Сохраняем ID канала и переходим к ожиданию текста
-            self.user_states[user_id]['stage'] = 'awaiting_post_text'
-            self.user_states[user_id]['data']['channel_id_tg'] = channel_id_tg
-            
-            await query.edit_message_text(
-                "💬 Канал выбран. Теперь отправьте **текст** сообщения для публикации. "
-                "(Пока без фото/видео)"
-            )
-
-# --- WebHook / CryptoCloud Handlers ---
-
-async def cryptocloud_webhook_handler(request):
-    """
-    Обработчик для WebHook уведомлений от CryptoCloud.
-    """
     try:
         data = await request.json()
-        order_id = data.get('order_id')
-        status = data.get('status') # 'success', 'fail'
-        amount = data.get('amount')
-        
-        logger.info(f"CryptoCloud Webhook received: Order {order_id}, Status: {status}")
-        
-        if order_id and status:
-            application = request.app['bot_app']
-            bot_logic = application.bot_logic
+        logging.info(f"CryptoPay Webhook received: {json.dumps(data)}")
+
+        if data.get('status') == 'paid': 
+            external_id = data.get('external_id') 
+            amount_paid = float(data.get('amount')) 
+            asset = data.get('asset')
+
+            if not external_id:
+                logging.warning("CryptoPay Webhook: Missing external_id in paid status.")
+                return web.json_response({'status': 'error', 'message': 'Missing external_id'}, status=400)
+
+            payment_info = bot_logic.db.get_payment_by_order_id(external_id)
             
-            # Получаем Application, чтобы отправить сообщение пользователю
-            
-            payment_info = bot_logic.db.get_payment_by_order_id(order_id)
-            if payment_info:
-                db_id, user_id, payment_amount = payment_info[0], payment_info[1], payment_info[2]
+            if payment_info and payment_info[4] == 'pending': 
+                user_id = payment_info[1]
                 
-                # Обновляем статус платежа
-                bot_logic.db.update_payment_status(order_id, status)
+                bot_logic.db.update_payment_status(external_id, 'success')
+                bot_logic.db.add_balance(user_id, amount_paid) 
                 
-                # Уведомляем пользователя
-                if status == 'success':
-                    bot_logic.db.add_balance(user_id, payment_amount)
-                    message = f"✅ Баланс пополнен! **{payment_amount} USD** зачислены на ваш счет."
-                elif status == 'fail':
-                    message = f"❌ Платеж по заказу `{order_id}` не удался. Попробуйте снова."
-                else:
-                    message = f"ℹ️ Статус платежа `{order_id}`: {status}."
-                    
-                await application.bot.send_message(chat_id=user_id, text=message, parse_mode='Markdown')
-                
+                await application.bot.send_message(
+                    chat_id=user_id, 
+                    text=f"✅ Баланс пополнен! **{amount_paid:.2f} {asset}** зачислены на ваш счет.", 
+                    parse_mode='Markdown'
+                )
+                logging.info(f"User {user_id} balance updated by {amount_paid} via CryptoPay. Order: {external_id}")
             else:
-                logger.warning(f"CryptoCloud Webhook: Payment with order_id {order_id} not found in DB.")
-                
+                logging.warning(f"CryptoPay Webhook: Payment with external_id {external_id} not found or already processed. Status: {payment_info[4] if payment_info else 'not found'}")
+            
+            return web.json_response({'status': 'ok'}) 
+        elif data.get('status') in ['expired', 'cancelled', 'failed']:
+            external_id = data.get('external_id')
+            if external_id:
+                bot_logic.db.update_payment_status(external_id, data.get('status'))
+                logging.info(f"CryptoPay payment {external_id} status updated to {data.get('status')}")
             return web.json_response({'status': 'ok'})
         
-        return web.json_response({'status': 'error', 'message': 'Invalid data'}, status=400)
+        return web.json_response({'status': 'ok'}) 
         
     except Exception as e:
-        logger.error(f"Error in CryptoCloud webhook handler: {traceback.format_exc()}")
+        logging.error(f"Error in CryptoPay webhook handler: {traceback.format_exc()}")
         return web.json_response({'status': 'error', 'message': 'Internal server error'}, status=500)
 
 
 def main():
-    # --- Инициализация ---
-    bot_logic = SchedulerBot()
-    
-    # Инициализируем Telegram Application
-    # ВАЖНО: PTB 21+ требует, чтобы CallbackQueryHandler был импортирован
+    bot_logic = SchedulerBot(DB_NAME)
     application = Application.builder().token(BOT_TOKEN).build()
-    
-    application.bot_logic = bot_logic
-    
-    # --- Добавление обработчиков ---
-    
+    bot_logic.set_application(application) # Передаем application в bot_logic
+
+    # --- Обработчики команд ---
     application.add_handler(CommandHandler("start", bot_logic.start))
-    application.add_handler(CommandHandler("status", bot_logic.show_status))
-    application.add_handler(CommandHandler("balance", bot_logic.show_balance)) # Добавлен
+    application.add_handler(CommandHandler("help", bot_logic.help_command))
     application.add_handler(CommandHandler("add_channel", bot_logic.add_channel))
-    application.add_handler(CommandHandler("channels", bot_logic.list_channels))
-    application.add_handler(CommandHandler("add_post", bot_logic.add_post))
-    application.add_handler(CommandHandler("posts", bot_logic.list_posts))
-    application.add_handler(CommandHandler("deposit", bot_logic.deposit))
+    application.add_handler(CommandHandler("my_channels", bot_logic.my_channels))
+    application.add_handler(CommandHandler("remove_channel", bot_logic.remove_channel))
+    application.add_handler(CommandHandler("schedule_post", bot_logic.schedule_post))
+    application.add_handler(CommandHandler("my_posts", bot_logic.my_posts))
+    application.add_handler(CommandHandler("cancel_post", bot_logic.cancel_post))
+    application.add_handler(CommandHandler("balance", bot_logic.show_balance))
+    application.add_handler(CommandHandler("deposit", bot_logic.deposit)) 
 
-    # Обработчик Inline-кнопок
-    # Используем правильный импорт CallbackQueryHandler
-    application.add_handler(CallbackQueryHandler(bot_logic.handle_callback_query, pattern='^select_channel_'))
+    # --- Обработчик текстовых сообщений (для ввода сумм, текста постов и т.д.) ---
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot_logic.handle_message))
+    
+    # --- Обработчик медиа сообщений (для фото и видео) ---
+    application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, bot_logic.handle_media)) # <-- ДОБАВЛЕНО
+    
+    # --- Обработчик callback-запросов от inline-кнопок ---
+    application.add_handler(CallbackQueryHandler(bot_logic.handle_callback_query))
 
-    # Обработчик сообщений
-    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, bot_logic.handle_message))
-
-
-    # Асинхронная функция для запуска сервера
+    # --- Запуск Webhook сервера ---
     async def start_webhook_server():
-        # Устанавливаем WebHook для Telegram
-        await application.bot.set_webhook(url=f"{WEB_SERVER_BASE_URL}/{BOT_TOKEN}")
-        
-        # Создаем AIOHTTP приложение
         app = web.Application()
-        app['bot_app'] = application
-        
-        # 1. WebHook для Telegram (стандартный путь)
+        app['bot_app'] = application 
+        app['bot_logic'] = bot_logic # Также можно передать bot_logic напрямую
+
+        # 1. WebHook для Telegram (основной)
         app.router.add_post(f"/{BOT_TOKEN}", application.update_queue.put) 
         
-        # 2. WebHook для CryptoCloud (кастомный путь)
-        app.router.add_post(WEBHOOK_PATH, cryptocloud_webhook_handler)
+        # 2. WebHook для CryptoPay Bot
+        app.router.add_post(CRYPTOPAY_WEBHOOK_PATH, cryptopay_webhook_handler) 
 
-        # 3. Запуск AIOHTTP сервера (захват порта 8080)
         runner = web.AppRunner(app)
         await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', WEB_SERVER_PORT)
-        
-        logger.info(f"🚀 Запуск WebHook-сервера на порту {WEB_SERVER_PORT}")
+        site = web.TCPSite(runner, '0.0.0.0', WEB_SERVER_PORT) # Используем '0.0.0.0' для Railway
         await site.start()
+        logging.info(f"Webhook server started on 0.0.0.0:{WEB_SERVER_PORT}")
+        logging.info(f"Telegram webhook set to: {WEB_SERVER_BASE_URL}/{BOT_TOKEN}")
+        logging.info(f"CryptoPay webhook set to: {WEB_SERVER_BASE_URL}{CRYPTOPAY_WEBHOOK_PATH}") 
         
-        # 4. Запускаем Telegram Application в фоновом режиме для обработки очереди
-        await application.initialize()
-        await application.start()
-        
-        # --- ИСПРАВЛЕНИЕ ОШИБКИ ATTRIBUTEERROR ---
-        # Вместо удаленного application.run_until_shutdown()
-        # используем бесконечный цикл, чтобы процесс не завершился
-        while True:
-            # Ждем долго, чтобы процесс не завершился. Railway будет поддерживать его.
-            await asyncio.sleep(3600) 
-            
-        # application.stop() не будет вызван, но это нормально для контейнеров (Railway)
+        # Запуск фоновой задачи публикации
+        bot_logic.publisher_task = asyncio.create_task(bot_logic.publish_scheduled_posts())
+        logging.info("Publisher task started.")
 
-    try:
-        # Запускаем сервер и бота в главном цикле
-        asyncio.run(start_webhook_server())
-    except KeyboardInterrupt:
-        logger.info("Бот остановлен.")
-    except Exception:
-        logger.error(f"Глобальная ошибка при запуске: {traceback.format_exc()}")
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(start_webhook_server())
+
+    # Установка Telegram Webhook
+    loop.run_until_complete(application.bot.set_webhook(url=f"{WEB_SERVER_BASE_URL}/{BOT_TOKEN}"))
+    
+    # Важно: Webhook для CryptoPay Bot устанавливается ОДИН раз через его API.
+    # Вы это уже сделали, указав ссылку на Railway.
+    # Проверка, что он установлен: https://pay.crypt.bot/api/getWebhookInfo?token=ВАШ_CRYPTOPAY_БОТ_ТОКЕН
+
+    loop.run_forever()
 
 if __name__ == '__main__':
     main()
