@@ -1,5 +1,3 @@
-# config.py
-
 import os
 import pytz
 from dotenv import load_dotenv
@@ -16,13 +14,9 @@ DB_NAME = "scheduler.db"
 
 # --- Настройки WebHook на Railway ---
 WEB_SERVER_PORT = int(os.environ.get('PORT', 8080))
-# Railway автоматически определит правильный URL
-WEB_SERVER_BASE_URL = os.getenv('RAILWAY_STATIC_URL',"mimikcopiraitingbot-v1-production.up.railway.app")
+WEB_SERVER_BASE_URL = os.getenv('RAILWAY_STATIC_URL', "https://mimikcopiraitingbot-v1-production.up.railway.app")
 
 # --- Настройки CryptoPay Bot ---
 CRYPTOPAY_BOT_TOKEN = os.getenv('470214:AAtsGnRZSFgSV3t0yqvHfoepEW37pAcm5Ao')
-# URL для создания счета в CryptoPay
 CRYPTOPAY_CREATE_INVOICE_URL = "https://pay.crypt.bot/api/createInvoice"
-# Путь для получения уведомлений от CryptoPay (можете оставить как есть)
 CRYPTOPAY_WEBHOOK_PATH = '/payment/cryptopay'
-
