@@ -1,9 +1,7 @@
-# database.py
-
 import sqlite3
 import logging
-import datetime # <-- ДОБАВИТЬ
-import pytz     # <-- ДОБАВИТЬ
+import datetime
+import pytz
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -13,12 +11,10 @@ class Database:
         self.init_db()
 
     def get_connection(self):
-        # Эта настройка помогает правильно работать с датой и временем
         return sqlite3.connect(self.db_name, detect_types=sqlite3.PARSE_DECLTYPES)
 
     def init_db(self):
         with self.get_connection() as conn:
-            # Таблица для пользователей
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY,
@@ -31,7 +27,6 @@ class Database:
                     max_posts_per_day INTEGER DEFAULT 2
                 )
             ''')
-            # Таблица для каналов
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS channels (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,7 +36,6 @@ class Database:
                     UNIQUE(user_id, channel_id)
                 )
             ''')
-            # Таблица для постов
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS posts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,13 +43,12 @@ class Database:
                     channel_id INTEGER NOT NULL,
                     text TEXT,
                     media_ids TEXT,
-                    publish_time TEXT NOT NULL, -- Храним как текст в формате ISO
+                    publish_time TEXT NOT NULL,
                     is_published INTEGER DEFAULT 0,
                     message_id INTEGER,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-            # Таблица для платежей
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS payments (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -70,7 +63,6 @@ class Database:
             ''')
             conn.commit()
 
-    # --- Методы для работы с пользователями ---
     def add_user(self, user_id, username):
         with self.get_connection() as conn:
             try:
@@ -78,12 +70,11 @@ class Database:
                 conn.commit()
             except sqlite3.IntegrityError:
                 pass
-    
+
     def get_user(self, user_id):
         with self.get_connection() as conn:
             return conn.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
 
-    # --- Методы для работы с каналами ---
     def add_channel(self, user_id, channel_id, channel_name):
         with self.get_connection() as conn:
             try:
@@ -106,7 +97,6 @@ class Database:
         with self.get_connection() as conn:
             return conn.execute('SELECT * FROM channels WHERE channel_id = ?', (channel_id,)).fetchone()
 
-    # --- Методы для работы с постами ---
     def add_post(self, user_id, channel_id, text, media_ids, publish_time):
         with self.get_connection() as conn:
             conn.execute(
@@ -143,8 +133,7 @@ class Database:
         with self.get_connection() as conn:
             conn.execute('DELETE FROM posts WHERE id = ?', (post_id,))
             conn.commit()
-            
-    # --- Методы для работы с платежами ---
+
     def add_payment(self, user_id, amount, order_id, status, external_url, payment_system):
         with self.get_connection() as conn:
             conn.execute(
@@ -171,4 +160,3 @@ class Database:
         with self.get_connection() as conn:
             result = conn.execute('SELECT balance FROM users WHERE id = ?', (user_id,)).fetchone()
             return result[0] if result else 0.0
-
