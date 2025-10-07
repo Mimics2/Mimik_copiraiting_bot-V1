@@ -1,10 +1,8 @@
-# bot.py
-
 import logging
 import sqlite3
 import asyncio
-import datetime # <-- Добавлен импорт
-import pytz # <-- Добавлен импорт
+import datetime
+import pytz
 import uuid
 import httpx
 import json
@@ -24,10 +22,8 @@ from config import (
 )
 from database import Database
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
 
 class SchedulerBot:
     def __init__(self, db_name):
@@ -40,11 +36,9 @@ class SchedulerBot:
     def set_application(self, application):
         self.application = application
 
-    # --- Хелперы ---
     def is_user_admin(self, user_id):
         return user_id in ADMIN_IDS
 
-    # --- Команды ---
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         self.db.add_user(user.id, user.username)
@@ -68,7 +62,6 @@ class SchedulerBot:
         )
         await update.message.reply_text(help_text)
 
-    # --- Управление каналами ---
     async def add_channel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         user_info = self.db.get_user(user_id)
@@ -111,14 +104,13 @@ class SchedulerBot:
         keyboard = [[InlineKeyboardButton(name, callback_data=f"remove_channel_{cid}")] for cid, name in channels]
         await update.message.reply_text("Выберите канал для удаления:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    # --- Планирование постов ---
     async def schedule_post(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         channels = self.db.get_user_channels(user_id)
         if not channels:
             await update.message.reply_text("Сначала добавьте канал через /add_channel.")
             return
-        
+
         keyboard = [[InlineKeyboardButton(name, callback_data=f"schedule_channel_{cid}")] for cid, name in channels]
         await update.message.reply_text("Выберите канал для поста:", reply_markup=InlineKeyboardMarkup(keyboard))
         self.user_states[user_id] = {'stage': 'awaiting_post_channel_selection'}
@@ -135,8 +127,7 @@ class SchedulerBot:
             channel_info = self.db.get_channel_info(channel_id)
             channel_name = channel_info[3] if channel_info else f"Канал ID: {channel_id}"
             status = "✅ Опубликован" if is_published else "⏳ В ожидании"
-            
-            # ИСПРАВЛЕНИЕ: Преобразуем строку времени в объект и выводим в нужной таймзоне
+
             publish_time_dt = datetime.datetime.fromisoformat(publish_time_str)
             moscow_time_str = publish_time_dt.astimezone(MOSCOW_TZ).strftime('%Y-%m-%d %H:%M:%S')
 
@@ -160,10 +151,9 @@ class SchedulerBot:
             publish_time_dt = datetime.datetime.fromisoformat(publish_time_str)
             time_str = publish_time_dt.astimezone(MOSCOW_TZ).strftime('%H:%M')
             keyboard.append([InlineKeyboardButton(f"Отменить пост {post_id} на {time_str}", callback_data=f"cancel_post_{post_id}")])
-        
+
         await update.message.reply_text("Выберите пост для отмены:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    # --- Баланс и Пополнение ---
     async def show_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         balance = self.db.get_user_balance(user_id)
@@ -188,7 +178,7 @@ class SchedulerBot:
             return
 
         order_id = str(uuid.uuid4())
-        
+
         headers = {'Crypto-Pay-API-Token': CRYPTOPAY_BOT_TOKEN}
         payload = {
             "asset": "USDT",
@@ -196,12 +186,12 @@ class SchedulerBot:
             "description": f"Пополнение баланса (user_id: {user_id})",
             "external_id": order_id,
         }
-        
+
         async with httpx.AsyncClient() as client:
             try:
                 response = await client.post(CRYPTOPAY_CREATE_INVOICE_URL, headers=headers, json=payload)
                 data = response.json()
-                
+
                 if response.status_code == 201 and data.get('ok'):
                     pay_url = data['result']['pay_url']
                     self.db.add_payment(user_id, amount, order_id, 'pending', pay_url, 'cryptopay')
@@ -218,7 +208,6 @@ class SchedulerBot:
                 logging.error(f"HTTP error during deposit: {e}")
                 await update.message.reply_text("❌ Ошибка связи с платежной системой.")
 
-    # --- Обработчики ---
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         state = self.user_states.get(user_id, {}).get('stage')
@@ -234,7 +223,7 @@ class SchedulerBot:
                 except Exception:
                     await update.message.reply_text("❌ Бот должен быть админом с правом на публикацию.")
                     return
-                
+
                 if self.db.add_channel(user_id, channel_id, channel_name):
                     await update.message.reply_text(f"✅ Канал **{channel_name}** добавлен!", parse_mode='Markdown')
                 else:
@@ -242,7 +231,7 @@ class SchedulerBot:
                 self.user_states.pop(user_id, None)
             else:
                 await update.message.reply_text("❌ Пожалуйста, перешлите сообщение из канала.")
-        
+
         elif state == 'awaiting_post_text':
             self.post_data.setdefault(user_id, {})['text'] = update.message.text
             await update.message.reply_text("Отправьте фото/видео или `-` (дефис), если медиа нет.")
@@ -298,7 +287,6 @@ class SchedulerBot:
             self.db.delete_post(int(data.split('_')[2]))
             await query.edit_message_text("✅ Пост отменен.")
 
-    # --- Публикация ---
     async def publish_scheduled_posts(self):
         while True:
             await asyncio.sleep(60)
@@ -311,15 +299,13 @@ class SchedulerBot:
                         message = await self.application.bot.send_message(channel_id, text, parse_mode='Markdown')
                     else:
                         message = await self.application.bot.send_photo(channel_id, media_ids[0], caption=text, parse_mode='Markdown')
-                    
+
                     if message:
                         self.db.set_post_published(post_id, message.message_id)
                         logging.info(f"Post {post_id} published.")
                 except Exception as e:
                     logging.error(f"Error publishing post {post_id}: {traceback.format_exc()}")
 
-
-# --- Webhook handler для CryptoPay Bot ---
 async def cryptopay_webhook_handler(request):
     application = request.app['bot_app']
     bot_logic = request.app['bot_logic']
@@ -331,31 +317,27 @@ async def cryptopay_webhook_handler(request):
             payload = data['payload']
             order_id = payload.get('external_id')
             payment_info = bot_logic.db.get_payment_by_order_id(order_id)
-            
+
             if payment_info and payment_info[4] == 'pending':
                 user_id, amount = payment_info[1], float(payment_info[2])
                 bot_logic.db.update_payment_status(order_id, 'success')
                 bot_logic.db.add_balance(user_id, amount)
                 await application.bot.send_message(user_id, f"✅ Баланс пополнен на **{amount:.2f} USD**.", parse_mode='Markdown')
                 logging.info(f"User {user_id} balance updated for order {order_id}")
-        
+
         return web.json_response({'status': 'ok'})
     except Exception:
         logging.error(f"Error in CryptoPay webhook: {traceback.format_exc()}")
         return web.json_response({'status': 'error'}, status=500)
 
-
-# --- Запуск ---
 def main():
     bot_logic = SchedulerBot(DB_NAME)
     application = Application.builder().token(BOT_TOKEN).build()
     bot_logic.set_application(application)
 
-    # Команды
     for command in ["start", "help", "add_channel", "my_channels", "remove_channel", "schedule_post", "my_posts", "cancel_post", "balance", "deposit"]:
         application.add_handler(CommandHandler(command, getattr(bot_logic, command)))
-    
-    # Обработчики
+
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot_logic.handle_message))
     application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, bot_logic.handle_media))
     application.add_handler(CallbackQueryHandler(bot_logic.handle_callback_query))
@@ -371,7 +353,7 @@ def main():
         site = web.TCPSite(runner, '0.0.0.0', WEB_SERVER_PORT)
         await site.start()
         logging.info(f"Payment webhook server started on port {WEB_SERVER_PORT}")
-        
+
         bot_logic.publisher_task = asyncio.create_task(bot_logic.publish_scheduled_posts())
         logging.info("Publisher task started.")
 
@@ -381,4 +363,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
