@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Настройки Telegram ---
-BOT_TOKEN = os.getenv('8335870133:AAHwcXoy3usOWT4Y9F8cSOPiHwX5OO33hI8')
+BOT_TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_IDS = [int(x) for x in os.getenv('ADMIN_IDS', '6646433980').split(',') if x]
 MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 
