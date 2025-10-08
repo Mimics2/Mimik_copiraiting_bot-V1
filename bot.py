@@ -14,6 +14,7 @@ from telegram.ext import (
 )
 from aiohttp import web
 
+# Импортируем из вашего файла
 from config import (
     BOT_TOKEN, ADMIN_IDS,
     WEB_SERVER_PORT, MOSCOW_TZ, WEB_SERVER_BASE_URL,
@@ -41,6 +42,10 @@ class SchedulerBot:
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
+        if not self.is_user_admin(user.id):
+            await update.message.reply_text("❌ У вас нет доступа к этому боту")
+            return
+            
         self.db.add_user(user.id, user.username)
         await update.message.reply_text(
             f"Привет, {user.first_name}!\n"
@@ -48,7 +53,12 @@ class SchedulerBot:
             "Используйте /help для списка команд."
         )
 
+    # Исправлено: добавлен метод для команды /help
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.is_user_admin(update.effective_user.id):
+            await update.message.reply_text("❌ У вас нет доступа")
+            return
+            
         help_text = (
             "Команды:\n"
             "/add_channel - Добавить канал.\n"
@@ -64,6 +74,10 @@ class SchedulerBot:
 
     async def add_channel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
+        if not self.is_user_admin(user_id):
+            await update.message.reply_text("❌ У вас нет доступа")
+            return
+            
         user_info = self.db.get_user(user_id)
         if not user_info:
             await update.message.reply_text("Пожалуйста, сначала используйте /start.")
@@ -84,6 +98,10 @@ class SchedulerBot:
 
     async def my_channels(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
+        if not self.is_user_admin(user_id):
+            await update.message.reply_text("❌ У вас нет доступа")
+            return
+            
         channels = self.db.get_user_channels(user_id)
         if not channels:
             await update.message.reply_text("У вас нет привязанных каналов. Используйте /add_channel.")
@@ -96,6 +114,10 @@ class SchedulerBot:
 
     async def remove_channel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
+        if not self.is_user_admin(user_id):
+            await update.message.reply_text("❌ У вас нет доступа")
+            return
+            
         channels = self.db.get_user_channels(user_id)
         if not channels:
             await update.message.reply_text("У вас нет каналов для удаления.")
@@ -106,6 +128,10 @@ class SchedulerBot:
 
     async def schedule_post(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
+        if not self.is_user_admin(user_id):
+            await update.message.reply_text("❌ У вас нет доступа")
+            return
+            
         channels = self.db.get_user_channels(user_id)
         if not channels:
             await update.message.reply_text("Сначала добавьте канал через /add_channel.")
@@ -117,6 +143,10 @@ class SchedulerBot:
 
     async def my_posts(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
+        if not self.is_user_admin(user_id):
+            await update.message.reply_text("❌ У вас нет доступа")
+            return
+            
         posts = self.db.get_user_posts(user_id)
         if not posts:
             await update.message.reply_text("У вас нет запланированных постов.")
@@ -141,6 +171,10 @@ class SchedulerBot:
 
     async def cancel_post(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
+        if not self.is_user_admin(user_id):
+            await update.message.reply_text("❌ У вас нет доступа")
+            return
+            
         pending_posts = [p for p in self.db.get_user_posts(user_id) if not p[4]]
         if not pending_posts:
             await update.message.reply_text("Нет постов для отмены.")
@@ -156,10 +190,19 @@ class SchedulerBot:
 
     async def show_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
+        if not self.is_user_admin(user_id):
+            await update.message.reply_text("❌ У вас нет доступа")
+            return
+            
         balance = self.db.get_user_balance(user_id)
         await update.message.reply_text(f"💰 Ваш баланс: **{balance:.2f} USD**", parse_mode='Markdown')
 
     async def deposit(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        if not self.is_user_admin(user_id):
+            await update.message.reply_text("❌ У вас нет доступа")
+            return
+            
         await update.message.reply_text(
             "💸 Введите сумму в **USD** для пополнения.\n"
             "Минимальная сумма - 1 USD. Оплата через **@CryptoBot**.",
@@ -210,6 +253,9 @@ class SchedulerBot:
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
+        if not self.is_user_admin(user_id):
+            return
+            
         state = self.user_states.get(user_id, {}).get('stage')
 
         if state == 'awaiting_channel_forward':
@@ -264,6 +310,9 @@ class SchedulerBot:
 
     async def handle_media(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
+        if not self.is_user_admin(user_id):
+            return
+            
         if self.user_states.get(user_id, {}).get('stage') == 'awaiting_post_media':
             media_id = update.message.photo[-1].file_id if update.message.photo else update.message.video.file_id
             self.post_data.setdefault(user_id, {})['media_ids'] = [media_id]
@@ -275,6 +324,9 @@ class SchedulerBot:
         user_id = query.from_user.id
         data = query.data
         await query.answer()
+        
+        if not self.is_user_admin(user_id):
+            return
 
         if data.startswith('remove_channel_'):
             self.db.remove_channel(user_id, int(data.split('_')[2]))
@@ -335,8 +387,9 @@ def main():
     application = Application.builder().token(BOT_TOKEN).build()
     bot_logic.set_application(application)
 
-    for command in ["start", "help", "add_channel", "my_channels", "remove_channel", "schedule_post", "my_posts", "cancel_post", "balance", "deposit"]:
-        application.add_handler(CommandHandler(command, getattr(bot_logic, command)))
+    for command in ["start", "help_command", "add_channel", "my_channels", "remove_channel", "schedule_post", "my_posts", "cancel_post", "balance", "deposit"]:
+        # Для команды /help используем help_command, чтобы избежать ошибки
+        application.add_handler(CommandHandler(command.replace('_command', ''), getattr(bot_logic, command)))
 
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot_logic.handle_message))
     application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, bot_logic.handle_media))
@@ -363,3 +416,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
