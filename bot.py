@@ -290,7 +290,6 @@ class SchedulerBot:
             
             next_post_time = "Нет запланированных"
             if posts:
-                # В get_scheduled_posts уже есть сортировка, поэтому берем первый элемент
                 next_post = posts[0]
                 next_time_str = next_post[5]
                 next_time = datetime.datetime.strptime(next_time_str, '%Y-%m-%d %H:%M:%S')
@@ -463,11 +462,13 @@ async def cryptopay_webhook_handler(request):
         logging.error(f"Error in CryptoPay webhook: {traceback.format_exc()}")
         return web.json_response({'status': 'error'}, status=500)
 
-def main():
+async def run_bot_and_tasks():
+    # Создаем объекты
     bot_logic = SchedulerBot(DB_NAME)
     application = Application.builder().token(BOT_TOKEN).build()
     bot_logic.set_application(application)
 
+    # Регистрируем обработчики
     commands_to_register = [
         ("start", bot_logic.start),
         ("help", bot_logic.help_command),
@@ -489,17 +490,17 @@ def main():
     application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, bot_logic.handle_media))
     application.add_handler(CallbackQueryHandler(bot_logic.handle_callback_query))
 
-    # Добавляем маршрут для CryptoPay webhook в `aiohttp.web.Application`
+    # Настраиваем aiohttp web-сервер для webhook
     app = web.Application()
     app.add_routes([web.post(CRYPTOPAY_WEBHOOK_PATH, cryptopay_webhook_handler)])
     app['bot_app'] = application
     app['bot_logic'] = bot_logic
-
+    
     # Запускаем фоновую задачу для публикации постов
     bot_logic.publisher_task = asyncio.create_task(bot_logic.publish_scheduled_posts())
     
     # Запускаем бота в режиме webhook, который будет использовать aiohttp
-    application.run_webhook(
+    await application.run_webhook(
         listen='0.0.0.0',
         port=WEB_SERVER_PORT,
         webhook_url=f"{WEB_SERVER_BASE_URL}{CRYPTOPAY_WEBHOOK_PATH}",
@@ -508,4 +509,4 @@ def main():
     )
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(run_bot_and_tasks())
