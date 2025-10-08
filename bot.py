@@ -445,11 +445,7 @@ async def cryptopay_webhook_handler(request):
         logging.error(f"Error in CryptoPay webhook: {traceback.format_exc()}")
         return web.json_response({'status': 'error'}, status=500)
 
-
 async def main_async():
-    """
-    Основная асинхронная функция для запуска всех задач бота.
-    """
     bot_logic = SchedulerBot(DB_NAME)
     application = Application.builder().token(BOT_TOKEN).build()
     bot_logic.set_application(application)
@@ -475,11 +471,12 @@ async def main_async():
     application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, bot_logic.handle_media))
     application.add_handler(CallbackQueryHandler(bot_logic.handle_callback_query))
 
-    # Создаем асинхронные задачи для веб-сервера и планировщика постов
+    # Создаем асинхронные задачи
     app = web.Application()
     app['bot_app'] = application
     app['bot_logic'] = bot_logic
     app.router.add_post(CRYPTOPAY_WEBHOOK_PATH, cryptopay_webhook_handler)
+
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', WEB_SERVER_PORT)
@@ -487,17 +484,18 @@ async def main_async():
 
     publisher_task = asyncio.create_task(bot_logic.publish_scheduled_posts())
     
-    # Запускаем все задачи вместе, включая polling
+    # Используем asyncio.gather для запуска всех задач
     try:
-        await application.run_polling()
-        # Этот код никогда не будет достигнут, так как run_polling() блокирует выполнение
-        await asyncio.gather(webhook_task, publisher_task)
+        await asyncio.gather(
+            application.run_polling(),
+            webhook_task,
+            publisher_task
+        )
     except Exception as e:
         logger.error(f"Ошибка при запуске бота: {e}")
         await application.shutdown()
-
+        
 if __name__ == '__main__':
-    # Запускаем основную асинхронную функцию
     try:
         asyncio.run(main_async())
     except KeyboardInterrupt:
