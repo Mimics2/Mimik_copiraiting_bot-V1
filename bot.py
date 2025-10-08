@@ -1,5 +1,4 @@
 import logging
-import sqlite3
 import asyncio
 import datetime
 import pytz
@@ -402,7 +401,7 @@ class SchedulerBot:
             self.db.delete_post(int(data.split('_')[2]))
             await query.edit_message_text("✅ Пост отменен.")
 
-    async def publish_scheduled_posts(self):
+    async def publish_scheduled_posts(self, application):
         while True:
             await asyncio.sleep(60)
             posts = self.db.get_posts_to_publish()
@@ -411,9 +410,9 @@ class SchedulerBot:
                     media_ids = json.loads(media_ids_str or '[]')
                     message = None
                     if not media_ids:
-                        message = await self.application.bot.send_message(channel_id, text, parse_mode='Markdown')
+                        message = await application.bot.send_message(channel_id, text, parse_mode='Markdown')
                     else:
-                        message = await self.application.bot.send_photo(channel_id, media_ids[0], caption=text, parse_mode='Markdown')
+                        message = await application.bot.send_photo(channel_id, media_ids[0], caption=text, parse_mode='Markdown')
 
                     if message:
                         self.db.set_post_published(post_id, message.message_id)
@@ -445,7 +444,8 @@ async def cryptopay_webhook_handler(request):
         logging.error(f"Error in CryptoPay webhook: {traceback.format_exc()}")
         return web.json_response({'status': 'error'}, status=500)
 
-async def main():
+
+def main():
     bot_logic = SchedulerBot(DB_NAME)
     application = Application.builder().token(BOT_TOKEN).build()
     bot_logic.set_application(application)
@@ -471,7 +471,7 @@ async def main():
     application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, bot_logic.handle_media))
     application.add_handler(CallbackQueryHandler(bot_logic.handle_callback_query))
 
-    # Создаем асинхронные задачи
+    # Запускаем все задачи
     async def on_startup(app):
         # Эта функция будет вызвана при старте polling-а
         app_web = web.Application()
@@ -486,7 +486,7 @@ async def main():
         logging.info(f"Payment webhook server started on port {WEB_SERVER_PORT}")
 
         # Запускаем фоновую задачу для публикации постов
-        bot_logic.publisher_task = asyncio.create_task(bot_logic.publish_scheduled_posts())
+        asyncio.create_task(bot_logic.publish_scheduled_posts())
         logging.info("Publisher task started.")
 
     # Запускаем все задачи
