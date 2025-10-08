@@ -445,6 +445,7 @@ async def cryptopay_webhook_handler(request):
         logging.error(f"Error in CryptoPay webhook: {traceback.format_exc()}")
         return web.json_response({'status': 'error'}, status=500)
 
+
 async def main_async():
     bot_logic = SchedulerBot(DB_NAME)
     application = Application.builder().token(BOT_TOKEN).build()
@@ -496,8 +497,7 @@ async def main_async():
         await application.shutdown()
         
 if __name__ == '__main__':
-    try:
-        asyncio.run(main_async())
-    except KeyboardInterrupt:
-        logger.info("Бот остановлен вручную.")
-
+    # Эта часть кода будет запущена Railway.
+    # Мы оставляем ее, но убираем asyncio.run()
+    # чтобы избежать конфликта, если Railway уже запустил цикл.
+    asyncio.run(main_async())
