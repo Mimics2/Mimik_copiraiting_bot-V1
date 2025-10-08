@@ -74,7 +74,7 @@ class Database:
     def get_user(self, user_id):
         with self.get_connection() as conn:
             return conn.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
-
+            
     def add_channel(self, user_id, channel_id, channel_name):
         with self.get_connection() as conn:
             try:
@@ -92,6 +92,10 @@ class Database:
     def get_user_channels(self, user_id):
         with self.get_connection() as conn:
             return conn.execute('SELECT channel_id, channel_name FROM channels WHERE user_id = ?', (user_id,)).fetchall()
+            
+    def get_channels(self):
+        with self.get_connection() as conn:
+            return conn.execute('SELECT * FROM channels').fetchall()
 
     def get_channel_info(self, channel_id):
         with self.get_connection() as conn:
@@ -118,6 +122,20 @@ class Database:
             return conn.execute(
                 'SELECT id, user_id, channel_id, text, media_ids FROM posts WHERE publish_time <= ? AND is_published = 0',
                 (now_utc_str,)
+            ).fetchall()
+            
+    def get_scheduled_posts(self):
+        with self.get_connection() as conn:
+            return conn.execute(
+                '''
+                SELECT 
+                    p.id, p.user_id, p.channel_id, p.text, p.media_ids, p.publish_time, 
+                    p.is_published, p.message_id, p.created_at, c.channel_name 
+                FROM posts p
+                JOIN channels c ON p.channel_id = c.channel_id
+                WHERE p.is_published = 0
+                ORDER BY p.publish_time ASC
+                '''
             ).fetchall()
 
     def set_post_published(self, post_id, message_id):
@@ -160,3 +178,4 @@ class Database:
         with self.get_connection() as conn:
             result = conn.execute('SELECT balance FROM users WHERE id = ?', (user_id,)).fetchone()
             return result[0] if result else 0.0
+
