@@ -1,5 +1,4 @@
 import logging
-import sqlite3
 import asyncio
 import datetime
 import pytz
@@ -445,8 +444,7 @@ async def cryptopay_webhook_handler(request):
         logging.error(f"Error in CryptoPay webhook: {traceback.format_exc()}")
         return web.json_response({'status': 'error'}, status=500)
 
-
-async def main_async():
+async def main():
     bot_logic = SchedulerBot(DB_NAME)
     application = Application.builder().token(BOT_TOKEN).build()
     bot_logic.set_application(application)
@@ -485,7 +483,7 @@ async def main_async():
 
     publisher_task = asyncio.create_task(bot_logic.publish_scheduled_posts())
     
-    # Запускаем все задачи вместе, включая polling
+    # Запускаем все задачи вместе, используя run_polling()
     try:
         await asyncio.gather(
             application.run_polling(),
@@ -495,9 +493,9 @@ async def main_async():
     except Exception as e:
         logger.error(f"Ошибка при запуске бота: {e}")
         await application.shutdown()
-        
+
 if __name__ == '__main__':
     # Эта часть кода будет запущена Railway.
     # Мы оставляем ее, но убираем asyncio.run()
     # чтобы избежать конфликта, если Railway уже запустил цикл.
-    asyncio.run(main_async())
+    main_async()
