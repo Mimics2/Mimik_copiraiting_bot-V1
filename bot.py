@@ -8,13 +8,12 @@ import httpx
 import json
 import traceback
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo, BotCommand
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 )
 from aiohttp import web
 
-# Импортируем из вашего файла
 from config import (
     BOT_TOKEN, ADMIN_IDS,
     WEB_SERVER_PORT, MOSCOW_TZ, WEB_SERVER_BASE_URL,
@@ -33,6 +32,7 @@ class SchedulerBot:
         self.post_data = {}
         self.application = None
         self.publisher_task = None
+        self.start_time = datetime.datetime.now(MOSCOW_TZ)
 
     def set_application(self, application):
         self.application = application
@@ -188,7 +188,8 @@ class SchedulerBot:
 
         await update.message.reply_text("Выберите пост для отмены:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    async def show_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Исправлено: добавлен метод для команды /balance
+    async def balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         if not self.is_user_admin(user_id):
             await update.message.reply_text("❌ У вас нет доступа")
@@ -196,7 +197,7 @@ class SchedulerBot:
             
         balance = self.db.get_user_balance(user_id)
         await update.message.reply_text(f"💰 Ваш баланс: **{balance:.2f} USD**", parse_mode='Markdown')
-
+        
     async def deposit(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         if not self.is_user_admin(user_id):
@@ -251,6 +252,70 @@ class SchedulerBot:
                 logging.error(f"HTTP error during deposit: {e}")
                 await update.message.reply_text("❌ Ошибка связи с платежной системой.")
 
+    async def show_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показывает статус бота, время и статистику"""
+        user_id = update.effective_user.id
+        if not self.is_user_admin(user_id):
+            await update.message.reply_text("❌ У вас нет доступа")
+            return
+        
+        try:
+            current_time = datetime.datetime.now(MOSCOW_TZ)
+            current_time_str = current_time.strftime('%d.%m.%Y %H:%M:%S')
+            
+            uptime = current_time - self.start_time
+            hours, remainder = divmod(uptime.total_seconds(), 3600)
+            minutes, seconds = divmod(remainder, 60)
+            uptime_str = f"{int(hours)}ч {int(minutes)}м {int(seconds)}с"
+            
+            channels = self.db.get_channels()
+            posts = self.db.get_scheduled_posts()
+            
+            scheduled_count = len(posts)
+            
+            next_post_time = "Нет запланированных"
+            if posts:
+                # Берем ближайший пост из отсортированного списка
+                next_post = posts[0]
+                next_time_str = next_post[5]
+                next_time = datetime.datetime.strptime(next_time_str, '%Y-%m-%d %H:%M:%S')
+                next_post_time = MOSCOW_TZ.localize(next_time).strftime('%d.%m.%Y %H:%M')
+            
+            status_message = (
+                f"🤖 **СТАТУС БОТА**\n\n"
+                f"⏰ **Текущее время:** {current_time_str} (МСК)\n"
+                f"🕐 **Время работы:** {uptime_str}\n"
+                f"📊 **Каналов подключено:** {len(channels)}\n"
+                f"📅 **Запланировано публикаций:** {scheduled_count}\n"
+                f"⏱ **Ближайшая публикация:** {next_post_time}\n"
+                f"🟢 **Статус:** Активен\n\n"
+                f"_Последнее обновление: {current_time.strftime('%H:%M:%S')}_"
+            )
+            
+            await update.message.reply_text(status_message, parse_mode='Markdown')
+            
+        except Exception as e:
+            logging.error(f"Error in status command: {e}")
+            await update.message.reply_text("❌ Ошибка при получении статуса")
+
+    async def list_channels(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        if not self.is_user_admin(user_id):
+            await update.message.reply_text("❌ У вас нет доступа")
+            return
+        
+        channels = self.db.get_user_channels(user_id)
+        
+        if not channels:
+            await update.message.reply_text("📭 Каналы не добавлены")
+            return
+        
+        message = "📋 **Список каналов:**\n\n"
+        for channel in channels:
+            message += f"• {channel[1]} ({channel[0]})\n"
+        
+        await update.message.reply_text(message, parse_mode='Markdown')
+        
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         if not self.is_user_admin(user_id):
@@ -262,6 +327,7 @@ class SchedulerBot:
             if update.message.forward_from_chat and update.message.forward_from_chat.type == 'channel':
                 channel_id = update.message.forward_from_chat.id
                 channel_name = update.message.forward_from_chat.title
+                
                 try:
                     member = await context.bot.get_chat_member(channel_id, context.bot.id)
                     if member.status != 'administrator' or not member.can_post_messages:
@@ -307,7 +373,7 @@ class SchedulerBot:
         elif state == 'awaiting_deposit_amount':
             await self.create_cryptopay_invoice(user_id, update.message.text, update)
             self.user_states.pop(user_id, None)
-
+            
     async def handle_media(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         if not self.is_user_admin(user_id):
@@ -387,9 +453,22 @@ def main():
     application = Application.builder().token(BOT_TOKEN).build()
     bot_logic.set_application(application)
 
-    for command in ["start", "help_command", "add_channel", "my_channels", "remove_channel", "schedule_post", "my_posts", "cancel_post", "balance", "deposit"]:
-        # Для команды /help используем help_command, чтобы избежать ошибки
-        application.add_handler(CommandHandler(command.replace('_command', ''), getattr(bot_logic, command)))
+    commands_to_register = [
+        ("start", bot_logic.start),
+        ("help", bot_logic.help_command),
+        ("status", bot_logic.show_status),
+        ("add_channel", bot_logic.add_channel),
+        ("my_channels", bot_logic.my_channels),
+        ("remove_channel", bot_logic.remove_channel),
+        ("schedule_post", bot_logic.schedule_post),
+        ("my_posts", bot_logic.my_posts),
+        ("cancel_post", bot_logic.cancel_post),
+        ("balance", bot_logic.balance),
+        ("deposit", bot_logic.deposit)
+    ]
+    
+    for command_name, handler_func in commands_to_register:
+        application.add_handler(CommandHandler(command_name, handler_func))
 
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot_logic.handle_message))
     application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, bot_logic.handle_media))
@@ -416,4 +495,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
