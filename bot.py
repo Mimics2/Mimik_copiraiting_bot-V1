@@ -53,7 +53,6 @@ class SchedulerBot:
             "Используйте /help для списка команд."
         )
 
-    # Исправлено: добавлен метод для команды /help
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.is_user_admin(update.effective_user.id):
             await update.message.reply_text("❌ У вас нет доступа")
@@ -188,7 +187,6 @@ class SchedulerBot:
 
         await update.message.reply_text("Выберите пост для отмены:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    # Исправлено: добавлен метод для команды /balance
     async def balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         if not self.is_user_admin(user_id):
@@ -275,7 +273,6 @@ class SchedulerBot:
             
             next_post_time = "Нет запланированных"
             if posts:
-                # Берем ближайший пост из отсортированного списка
                 next_post = posts[0]
                 next_time_str = next_post[5]
                 next_time = datetime.datetime.strptime(next_time_str, '%Y-%m-%d %H:%M:%S')
@@ -448,6 +445,23 @@ async def cryptopay_webhook_handler(request):
         logging.error(f"Error in CryptoPay webhook: {traceback.format_exc()}")
         return web.json_response({'status': 'error'}, status=500)
 
+async def run_app():
+    app = web.Application()
+    app['bot_app'] = application
+    app['bot_logic'] = bot_logic
+    app.router.add_post(CRYPTOPAY_WEBHOOK_PATH, cryptopay_webhook_handler)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', WEB_SERVER_PORT)
+    await site.start()
+    logging.info(f"Payment webhook server started on port {WEB_SERVER_PORT}")
+
+    bot_logic.publisher_task = asyncio.create_task(bot_logic.publish_scheduled_posts())
+    logging.info("Publisher task started.")
+
+    await application.run_polling()
+
 def main():
     bot_logic = SchedulerBot(DB_NAME)
     application = Application.builder().token(BOT_TOKEN).build()
@@ -473,23 +487,6 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot_logic.handle_message))
     application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, bot_logic.handle_media))
     application.add_handler(CallbackQueryHandler(bot_logic.handle_callback_query))
-
-    async def run_app():
-        app = web.Application()
-        app['bot_app'] = application
-        app['bot_logic'] = bot_logic
-        app.router.add_post(CRYPTOPAY_WEBHOOK_PATH, cryptopay_webhook_handler)
-
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', WEB_SERVER_PORT)
-        await site.start()
-        logging.info(f"Payment webhook server started on port {WEB_SERVER_PORT}")
-
-        bot_logic.publisher_task = asyncio.create_task(bot_logic.publish_scheduled_posts())
-        logging.info("Publisher task started.")
-
-        await application.run_polling()
 
     asyncio.run(run_app())
 
