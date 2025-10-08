@@ -445,8 +445,7 @@ async def cryptopay_webhook_handler(request):
         logging.error(f"Error in CryptoPay webhook: {traceback.format_exc()}")
         return web.json_response({'status': 'error'}, status=500)
 
-
-def main():
+async def main():
     bot_logic = SchedulerBot(DB_NAME)
     application = Application.builder().token(BOT_TOKEN).build()
     bot_logic.set_application(application)
@@ -474,15 +473,19 @@ def main():
 
     # Создаем асинхронные задачи
     async def on_startup(app):
-        app['bot_logic'] = bot_logic
-        app.router.add_post(CRYPTOPAY_WEBHOOK_PATH, cryptopay_webhook_handler)
+        # Эта функция будет вызвана при старте polling-а
+        app_web = web.Application()
+        app_web['bot_app'] = application
+        app_web['bot_logic'] = bot_logic
+        app_web.router.add_post(CRYPTOPAY_WEBHOOK_PATH, cryptopay_webhook_handler)
 
-        runner = web.AppRunner(app)
+        runner = web.AppRunner(app_web)
         await runner.setup()
         site = web.TCPSite(runner, '0.0.0.0', WEB_SERVER_PORT)
         await site.start()
         logging.info(f"Payment webhook server started on port {WEB_SERVER_PORT}")
 
+        # Запускаем фоновую задачу для публикации постов
         bot_logic.publisher_task = asyncio.create_task(bot_logic.publish_scheduled_posts())
         logging.info("Publisher task started.")
 
