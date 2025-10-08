@@ -178,4 +178,3 @@ class Database:
         with self.get_connection() as conn:
             result = conn.execute('SELECT balance FROM users WHERE id = ?', (user_id,)).fetchone()
             return result[0] if result else 0.0
-
