@@ -47,6 +47,23 @@ class SchedulerBot:
             return
             
         self.db.add_user(user.id, user.username)
+        
+        commands = [
+            BotCommand("start", "Запуск бота"),
+            BotCommand("help", "Помощь"),
+            BotCommand("status", "Статус бота"),
+            BotCommand("add_channel", "Добавить канал"),
+            BotCommand("my_channels", "Мои каналы"),
+            BotCommand("remove_channel", "Отвязать канал"),
+            BotCommand("schedule_post", "Запланировать пост"),
+            BotCommand("my_posts", "Мои посты"),
+            BotCommand("cancel_post", "Отменить пост"),
+            BotCommand("balance", "Проверить баланс"),
+            BotCommand("deposit", "Пополнить баланс")
+        ]
+        
+        await context.bot.set_my_commands(commands)
+        
         await update.message.reply_text(
             f"Привет, {user.first_name}!\n"
             "Я бот для отложенного постинга в Telegram-каналах.\n"
@@ -273,6 +290,7 @@ class SchedulerBot:
             
             next_post_time = "Нет запланированных"
             if posts:
+                # В get_scheduled_posts уже есть сортировка, поэтому берем первый элемент
                 next_post = posts[0]
                 next_time_str = next_post[5]
                 next_time = datetime.datetime.strptime(next_time_str, '%Y-%m-%d %H:%M:%S')
@@ -445,7 +463,7 @@ async def cryptopay_webhook_handler(request):
         logging.error(f"Error in CryptoPay webhook: {traceback.format_exc()}")
         return web.json_response({'status': 'error'}, status=500)
 
-async def run_app():
+async def run_app(application, bot_logic):
     app = web.Application()
     app['bot_app'] = application
     app['bot_logic'] = bot_logic
@@ -488,7 +506,7 @@ def main():
     application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, bot_logic.handle_media))
     application.add_handler(CallbackQueryHandler(bot_logic.handle_callback_query))
 
-    asyncio.run(run_app())
+    asyncio.run(run_app(application, bot_logic))
 
 if __name__ == '__main__':
     main()
