@@ -463,12 +463,10 @@ async def cryptopay_webhook_handler(request):
         return web.json_response({'status': 'error'}, status=500)
 
 async def run_bot_and_tasks():
-    # Создаем объекты
     bot_logic = SchedulerBot(DB_NAME)
     application = Application.builder().token(BOT_TOKEN).build()
     bot_logic.set_application(application)
 
-    # Регистрируем обработчики
     commands_to_register = [
         ("start", bot_logic.start),
         ("help", bot_logic.help_command),
@@ -490,22 +488,23 @@ async def run_bot_and_tasks():
     application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, bot_logic.handle_media))
     application.add_handler(CallbackQueryHandler(bot_logic.handle_callback_query))
 
-    # Настраиваем aiohttp web-сервер для webhook
     app = web.Application()
     app.add_routes([web.post(CRYPTOPAY_WEBHOOK_PATH, cryptopay_webhook_handler)])
     app['bot_app'] = application
     app['bot_logic'] = bot_logic
     
-    # Запускаем фоновую задачу для публикации постов
     bot_logic.publisher_task = asyncio.create_task(bot_logic.publish_scheduled_posts())
     
-    # Запускаем бота в режиме webhook, который будет использовать aiohttp
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', WEB_SERVER_PORT)
+    await site.start()
+    
     await application.run_webhook(
         listen='0.0.0.0',
         port=WEB_SERVER_PORT,
         webhook_url=f"{WEB_SERVER_BASE_URL}{CRYPTOPAY_WEBHOOK_PATH}",
-        url_path=CRYPTOPAY_WEBHOOK_PATH,
-        web_server=web.TCPSite(app.make_handler(), '0.0.0.0', WEB_SERVER_PORT)
+        url_path=CRYPTOPAY_WEBHOOK_PATH
     )
 
 if __name__ == '__main__':
