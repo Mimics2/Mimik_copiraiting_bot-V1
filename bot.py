@@ -1,4 +1,5 @@
 import logging
+import sqlite3
 import asyncio
 import datetime
 import pytz
@@ -443,6 +444,7 @@ async def cryptopay_webhook_handler(request):
     except Exception:
         logging.error(f"Error in CryptoPay webhook: {traceback.format_exc()}")
         return web.json_response({'status': 'error'}, status=500)
+
 
 async def main():
     bot_logic = SchedulerBot(DB_NAME)
