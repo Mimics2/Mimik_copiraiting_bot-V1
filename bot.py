@@ -8,7 +8,7 @@ import httpx
 import json
 import traceback
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo, BotCommand
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 )
@@ -47,23 +47,6 @@ class SchedulerBot:
             return
             
         self.db.add_user(user.id, user.username)
-        
-        commands = [
-            BotCommand("start", "Запуск бота"),
-            BotCommand("help", "Помощь"),
-            BotCommand("status", "Статус бота"),
-            BotCommand("add_channel", "Добавить канал"),
-            BotCommand("my_channels", "Мои каналы"),
-            BotCommand("remove_channel", "Отвязать канал"),
-            BotCommand("schedule_post", "Запланировать пост"),
-            BotCommand("my_posts", "Мои посты"),
-            BotCommand("cancel_post", "Отменить пост"),
-            BotCommand("balance", "Проверить баланс"),
-            BotCommand("deposit", "Пополнить баланс")
-        ]
-        
-        await context.bot.set_my_commands(commands)
-        
         await update.message.reply_text(
             f"Привет, {user.first_name}!\n"
             "Я бот для отложенного постинга в Telegram-каналах.\n"
@@ -462,7 +445,28 @@ async def cryptopay_webhook_handler(request):
         logging.error(f"Error in CryptoPay webhook: {traceback.format_exc()}")
         return web.json_response({'status': 'error'}, status=500)
 
-async def run_bot_and_tasks():
+async def run_bot_and_tasks(application, bot_logic):
+    """
+    Основная асинхронная функция для запуска всех задач.
+    """
+    # Запускаем фоновую задачу для публикации постов
+    bot_logic.publisher_task = asyncio.create_task(bot_logic.publish_scheduled_posts())
+    
+    # Создаем и запускаем веб-сервер для вебхуков
+    runner = web.AppRunner(web.Application())
+    runner.app['bot_app'] = application
+    runner.app['bot_logic'] = bot_logic
+    runner.app.router.add_post(CRYPTOPAY_WEBHOOK_PATH, cryptopay_webhook_handler)
+
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', WEB_SERVER_PORT)
+    await site.start()
+    logging.info(f"Payment webhook server started on port {WEB_SERVER_PORT}")
+    
+    # Запускаем polling бота. Эта задача будет работать до завершения.
+    await application.run_polling()
+
+def main():
     bot_logic = SchedulerBot(DB_NAME)
     application = Application.builder().token(BOT_TOKEN).build()
     bot_logic.set_application(application)
@@ -488,24 +492,13 @@ async def run_bot_and_tasks():
     application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, bot_logic.handle_media))
     application.add_handler(CallbackQueryHandler(bot_logic.handle_callback_query))
 
-    app = web.Application()
-    app.add_routes([web.post(CRYPTOPAY_WEBHOOK_PATH, cryptopay_webhook_handler)])
-    app['bot_app'] = application
-    app['bot_logic'] = bot_logic
-    
-    bot_logic.publisher_task = asyncio.create_task(bot_logic.publish_scheduled_posts())
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', WEB_SERVER_PORT)
-    await site.start()
-    
-    await application.run_webhook(
-        listen='0.0.0.0',
-        port=WEB_SERVER_PORT,
-        webhook_url=f"{WEB_SERVER_BASE_URL}{CRYPTOPAY_WEBHOOK_PATH}",
-        url_path=CRYPTOPAY_WEBHOOK_PATH
-    )
+    # Запускаем все асинхронные задачи.
+    try:
+        asyncio.run(run_bot_and_tasks(application, bot_logic))
+    except KeyboardInterrupt:
+        logger.info("Бот остановлен вручную")
+    except Exception as e:
+        logger.error(f"Ошибка при запуске бота: {e}")
 
 if __name__ == '__main__':
-    asyncio.run(run_bot_and_tasks())
+    main()
