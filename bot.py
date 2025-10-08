@@ -29,11 +29,7 @@ class SchedulerBot:
     def __init__(self, db_name):
         self.db = Database(db_name)
         self.user_states = {}
-        self.post_data = {}
-        self.application = None
-        self.publisher_task = None
-        self.start_time = datetime.datetime.now(MOSCOW_TZ)
-
+    
     def set_application(self, application):
         self.application = application
 
@@ -446,7 +442,7 @@ async def cryptopay_webhook_handler(request):
         return web.json_response({'status': 'error'}, status=500)
 
 
-async def main():
+def main():
     bot_logic = SchedulerBot(DB_NAME)
     application = Application.builder().token(BOT_TOKEN).build()
     bot_logic.set_application(application)
@@ -472,32 +468,31 @@ async def main():
     application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, bot_logic.handle_media))
     application.add_handler(CallbackQueryHandler(bot_logic.handle_callback_query))
 
-    # Создаем асинхронные задачи
-    app = web.Application()
-    app['bot_app'] = application
-    app['bot_logic'] = bot_logic
-    app.router.add_post(CRYPTOPAY_WEBHOOK_PATH, cryptopay_webhook_handler)
+    # Запускаем все задачи
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        on_startup=run_startup_tasks(application, bot_logic)
+    )
 
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', WEB_SERVER_PORT)
-    webhook_task = asyncio.create_task(site.start())
+def run_startup_tasks(application, bot_logic):
+    async def startup_tasks(app):
+        # Эта функция будет вызвана при старте polling-а
+        app_web = web.Application()
+        app_web['bot_app'] = application
+        app_web['bot_logic'] = bot_logic
+        app_web.router.add_post(CRYPTOPAY_WEBHOOK_PATH, cryptopay_webhook_handler)
 
-    publisher_task = asyncio.create_task(bot_logic.publish_scheduled_posts())
-    
-    # Запускаем все задачи вместе, используя run_polling()
-    try:
-        await asyncio.gather(
-            application.run_polling(),
-            webhook_task,
-            publisher_task
-        )
-    except Exception as e:
-        logger.error(f"Ошибка при запуске бота: {e}")
-        await application.shutdown()
+        runner = web.AppRunner(app_web)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', WEB_SERVER_PORT)
+        await site.start()
+        logging.info(f"Payment webhook server started on port {WEB_SERVER_PORT}")
+
+        bot_logic.publisher_task = asyncio.create_task(bot_logic.publish_scheduled_posts())
+        logging.info("Publisher task started.")
+
+    return startup_tasks
+
 
 if __name__ == '__main__':
-    # Эта часть кода будет запущена Railway.
-    # Мы оставляем ее, но убираем asyncio.run()
-    # чтобы избежать конфликта, если Railway уже запустил цикл.
-    main_async()
+    main()
