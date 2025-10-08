@@ -207,7 +207,7 @@ class SchedulerBot:
             "Минимальная сумма - 1 USD. Оплата через **@CryptoBot**.",
             parse_mode='Markdown'
         )
-        self.user_states[update.effective_user.id] = {'stage': 'awaiting_deposit_amount'}
+        self.user_states[user_id] = {'stage': 'awaiting_deposit_amount'}
 
     async def create_cryptopay_invoice(self, user_id, amount_str: str, update: Update):
         try:
