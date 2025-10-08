@@ -8,7 +8,7 @@ import httpx
 import json
 import traceback
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo, BotCommand
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 )
@@ -463,23 +463,6 @@ async def cryptopay_webhook_handler(request):
         logging.error(f"Error in CryptoPay webhook: {traceback.format_exc()}")
         return web.json_response({'status': 'error'}, status=500)
 
-async def run_app(application, bot_logic):
-    app = web.Application()
-    app['bot_app'] = application
-    app['bot_logic'] = bot_logic
-    app.router.add_post(CRYPTOPAY_WEBHOOK_PATH, cryptopay_webhook_handler)
-
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', WEB_SERVER_PORT)
-    await site.start()
-    logging.info(f"Payment webhook server started on port {WEB_SERVER_PORT}")
-
-    bot_logic.publisher_task = asyncio.create_task(bot_logic.publish_scheduled_posts())
-    logging.info("Publisher task started.")
-
-    await application.run_polling()
-
 def main():
     bot_logic = SchedulerBot(DB_NAME)
     application = Application.builder().token(BOT_TOKEN).build()
@@ -506,7 +489,23 @@ def main():
     application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, bot_logic.handle_media))
     application.add_handler(CallbackQueryHandler(bot_logic.handle_callback_query))
 
-    asyncio.run(run_app(application, bot_logic))
+    # Добавляем маршрут для CryptoPay webhook в `aiohttp.web.Application`
+    app = web.Application()
+    app.add_routes([web.post(CRYPTOPAY_WEBHOOK_PATH, cryptopay_webhook_handler)])
+    app['bot_app'] = application
+    app['bot_logic'] = bot_logic
+
+    # Запускаем фоновую задачу для публикации постов
+    bot_logic.publisher_task = asyncio.create_task(bot_logic.publish_scheduled_posts())
+    
+    # Запускаем бота в режиме webhook, который будет использовать aiohttp
+    application.run_webhook(
+        listen='0.0.0.0',
+        port=WEB_SERVER_PORT,
+        webhook_url=f"{WEB_SERVER_BASE_URL}{CRYPTOPAY_WEBHOOK_PATH}",
+        url_path=CRYPTOPAY_WEBHOOK_PATH,
+        web_server=web.TCPSite(app.make_handler(), '0.0.0.0', WEB_SERVER_PORT)
+    )
 
 if __name__ == '__main__':
     main()
