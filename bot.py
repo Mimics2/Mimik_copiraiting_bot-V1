@@ -484,7 +484,7 @@ async def main_async():
 
     publisher_task = asyncio.create_task(bot_logic.publish_scheduled_posts())
     
-    # Используем asyncio.gather для запуска всех задач
+    # Запускаем все задачи вместе, включая polling
     try:
         await asyncio.gather(
             application.run_polling(),
