@@ -29,7 +29,11 @@ class SchedulerBot:
     def __init__(self, db_name):
         self.db = Database(db_name)
         self.user_states = {}
-    
+        self.post_data = {}
+        self.application = None
+        self.publisher_task = None
+        self.start_time = datetime.datetime.now(MOSCOW_TZ)
+
     def set_application(self, application):
         self.application = application
 
@@ -468,21 +472,12 @@ def main():
     application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, bot_logic.handle_media))
     application.add_handler(CallbackQueryHandler(bot_logic.handle_callback_query))
 
-    # Запускаем все задачи
-    application.run_polling(
-        allowed_updates=Update.ALL_TYPES,
-        on_startup=run_startup_tasks(application, bot_logic)
-    )
+    # Создаем асинхронные задачи
+    async def on_startup(app):
+        app['bot_logic'] = bot_logic
+        app.router.add_post(CRYPTOPAY_WEBHOOK_PATH, cryptopay_webhook_handler)
 
-def run_startup_tasks(application, bot_logic):
-    async def startup_tasks(app):
-        # Эта функция будет вызвана при старте polling-а
-        app_web = web.Application()
-        app_web['bot_app'] = application
-        app_web['bot_logic'] = bot_logic
-        app_web.router.add_post(CRYPTOPAY_WEBHOOK_PATH, cryptopay_webhook_handler)
-
-        runner = web.AppRunner(app_web)
+        runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, '0.0.0.0', WEB_SERVER_PORT)
         await site.start()
@@ -491,8 +486,11 @@ def run_startup_tasks(application, bot_logic):
         bot_logic.publisher_task = asyncio.create_task(bot_logic.publish_scheduled_posts())
         logging.info("Publisher task started.")
 
-    return startup_tasks
-
+    # Запускаем все задачи
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        on_startup=on_startup
+    )
 
 if __name__ == '__main__':
     main()
